@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-14
+
 ### Added
 - **Claude Cowork support via a host↔VM secret broker.** In Cowork the agent's
   commands run in an isolated Linux VM with no vault CLI, while the hooks run on
