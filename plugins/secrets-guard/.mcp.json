@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "secrets-guard": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/secrets-guard",
+      "args": ["mcp"]
+    }
+  }
+}

@@ -1,0 +1,18 @@
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Go
+*.out
+*.test
+coverage.*
+
+# Local audit logs / scratch
+*.audit.log
+/tmp-*
+
+
+# NOTE: plugins/secrets-guard/bin/* (prebuilt binaries) ARE committed on purpose,
+# so the plugin works when installed from the git marketplace without a Go build.

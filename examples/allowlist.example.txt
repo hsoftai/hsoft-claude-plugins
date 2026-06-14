@@ -1,0 +1,6 @@
+# secrets-guard allowlist — one regex per line. Findings whose value matches any
+# line are treated as non-secrets (false positives / public sample values).
+# Lines starting with # are comments.
+
+AKIAIOSFODNN7EXAMPLE
+wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY

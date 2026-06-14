@@ -1,0 +1,5 @@
+[
+  { "category": "CO_NIT", "pattern": "\\bNIT[-: ]?\\d{9,10}(-\\d)?\\b" },
+  { "category": "CO_CEDULA", "pattern": "\\b(?:c[eé]dula|CC)[-: ]?\\d{6,10}\\b" },
+  { "category": "INTERNAL_API_KEY", "pattern": "\\bBIOS_[A-Z0-9]{24,}\\b" }
+]

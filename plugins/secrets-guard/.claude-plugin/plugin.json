@@ -1,0 +1,65 @@
+{
+  "name": "secrets-guard",
+  "displayName": "secrets-guard",
+  "version": "0.1.0",
+  "description": "Keep secrets out of the model: block plaintext secrets in prompts, resolve vault references (Keeper/1Password) into tool input, and redact secrets leaked in tool output.",
+  "author": { "name": "Humphrey Consulting Group" },
+  "license": "MIT",
+  "keywords": ["security", "dlp", "secrets", "redaction", "keeper", "1password"],
+  "userConfig": {
+    "vault_provider": {
+      "type": "string",
+      "title": "Vault provider",
+      "description": "Which secret vault to resolve references from: auto (Keeper, then 1Password), keeper, or 1password.",
+      "default": "auto"
+    },
+    "op_account": {
+      "type": "string",
+      "title": "1Password account",
+      "description": "Account (shorthand, sign-in address, or ID) to pass to `op` on machines with multiple 1Password accounts. Leave empty if you only have one.",
+      "default": ""
+    },
+    "block_on_prompt_secret": {
+      "type": "boolean",
+      "title": "Block prompts with plaintext secrets",
+      "description": "When true, a prompt containing a plaintext secret is blocked before it reaches the model.",
+      "default": true
+    },
+    "tool_input_policy": {
+      "type": "string",
+      "title": "Tool input policy",
+      "description": "Action when a tool call carries a plaintext secret: deny, redact, or warn.",
+      "default": "deny"
+    },
+    "tool_output_mode": {
+      "type": "string",
+      "title": "Tool output mode",
+      "description": "Action on secrets leaked in tool output: redact, block, or off.",
+      "default": "redact"
+    },
+    "command_references": {
+      "type": "string",
+      "title": "Command references",
+      "description": "Whether to replace vault references with their value in Bash command bodies: 'inject' (default) injects the value, 'keep' leaves every reference literal. Either way, references are always resolved internally so the output is redacted; commands that resolve references themselves (op read, ksm notation, secrets-guard read/run) always keep them literal, and a single occurrence can opt out with a leading backslash (\\op://...).",
+      "default": "inject"
+    },
+    "custom_patterns_path": {
+      "type": "file",
+      "title": "Custom patterns file",
+      "description": "JSON file of additional {category, pattern} detection rules.",
+      "default": ""
+    },
+    "allowlist_path": {
+      "type": "file",
+      "title": "Allowlist file",
+      "description": "File of regexes (one per line) whose matches are treated as non-secrets.",
+      "default": ""
+    },
+    "audit_log_path": {
+      "type": "file",
+      "title": "Audit log file",
+      "description": "Path to append value-free audit records (JSON lines).",
+      "default": ""
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "hsoft-claude-plugins",
+  "owner": { "name": "Humphrey Consulting Group" },
+  "description": "Security plugins for Claude Code: keep secrets out of the model.",
+  "metadata": { "pluginRoot": "./plugins" },
+  "plugins": [
+    {
+      "name": "secrets-guard",
+      "source": "./plugins/secrets-guard",
+      "description": "Block, redact and vault-resolve secrets across prompts and tools (Keeper / 1Password).",
+      "category": "security",
+      "tags": ["dlp", "secrets", "redaction", "keeper", "1password"]
+    }
+  ]
+}

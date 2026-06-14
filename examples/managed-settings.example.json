@@ -1,0 +1,30 @@
+{
+  "extraKnownMarketplaces": {
+    "hsoft-claude-plugins": {
+      "source": {
+        "source": "github",
+        "repo": "hsoftai/hsoft-claude-plugins"
+      },
+      "autoUpdate": true
+    }
+  },
+  "enabledPlugins": {
+    "secrets-guard@hsoft-claude-plugins": true
+  },
+  "strictKnownMarketplaces": [
+    {
+      "source": "github",
+      "repo": "hsoftai/hsoft-claude-plugins"
+    }
+  ],
+  "env": {
+    "CLAUDE_PLUGIN_OPTION_VAULT_PROVIDER": "keeper",
+    "CLAUDE_PLUGIN_OPTION_OP_ACCOUNT": "",
+    "CLAUDE_PLUGIN_OPTION_BLOCK_ON_PROMPT_SECRET": "true",
+    "CLAUDE_PLUGIN_OPTION_TOOL_INPUT_POLICY": "deny",
+    "CLAUDE_PLUGIN_OPTION_TOOL_OUTPUT_MODE": "redact",
+    "CLAUDE_PLUGIN_OPTION_CUSTOM_PATTERNS_PATH": "/etc/secrets-guard/custom-patterns.json",
+    "CLAUDE_PLUGIN_OPTION_ALLOWLIST_PATH": "/etc/secrets-guard/allowlist.txt",
+    "CLAUDE_PLUGIN_OPTION_AUDIT_LOG_PATH": "/var/log/secrets-guard/audit.log"
+  }
+}

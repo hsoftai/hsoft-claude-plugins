@@ -1,0 +1,578 @@
+// Command secrets-guard is the single binary invoked by the Claude Code hooks
+// of the secrets-guard plugin. It reads a hook JSON payload on stdin, applies
+// the configured DLP policy (block / deny / inject / redact) and writes the
+// hook decision JSON to stdout.
+//
+// Subcommands:
+//
+//	secrets-guard            run as a hook (default; reads stdin)
+//	secrets-guard scan       read stdin, print detected findings (debug)
+//	secrets-guard version    print version
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+
+	"github.com/hsoftai/hsoft-claude-plugins/internal/audit"
+	"github.com/hsoftai/hsoft-claude-plugins/internal/cache"
+	"github.com/hsoftai/hsoft-claude-plugins/internal/catalog"
+	"github.com/hsoftai/hsoft-claude-plugins/internal/config"
+	"github.com/hsoftai/hsoft-claude-plugins/internal/detect"
+	"github.com/hsoftai/hsoft-claude-plugins/internal/hook"
+	"github.com/hsoftai/hsoft-claude-plugins/internal/mcp"
+	"github.com/hsoftai/hsoft-claude-plugins/internal/redact"
+	"github.com/hsoftai/hsoft-claude-plugins/internal/seen"
+	"github.com/hsoftai/hsoft-claude-plugins/internal/vault"
+)
+
+// version is overridden at build time via -ldflags.
+var version = "dev"
+
+func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "version", "--version", "-v":
+			fmt.Println("secrets-guard", version)
+			return
+		case "scan":
+			runScan()
+			return
+		case "redact-stream":
+			runRedactStream()
+			return
+		case "mcp":
+			runMCP()
+			return
+		case "cache-daemon":
+			_ = cache.RunDaemon(os.Getenv("SG_SESSION"))
+			return
+		case "run":
+			runRun()
+			return
+		case "install":
+			runInstall()
+			return
+		case "read":
+			runRead()
+			return
+		}
+	}
+	runHook()
+}
+
+// buildEngine constructs the detection engine with optional custom patterns and
+// allowlist. Failures to load optional files are reported on stderr but never
+// fatal — the built-in ruleset must always remain active.
+func buildEngine(cfg config.Config) *detect.Engine {
+	eng := detect.New()
+	if err := eng.LoadCustomPatterns(cfg.CustomPatternsPath); err != nil {
+		fmt.Fprintln(os.Stderr, "secrets-guard: custom patterns:", err)
+	}
+	if err := eng.LoadAllowlist(cfg.AllowlistPath); err != nil {
+		fmt.Fprintln(os.Stderr, "secrets-guard: allowlist:", err)
+	}
+	return eng
+}
+
+func runHook() {
+	cfg := config.Load(os.Getenv)
+	eng := buildEngine(cfg)
+	red := redact.New(eng)
+
+	resolver, err := vault.Select(cfg.VaultProvider, vault.NewRunner(), cfg.OPAccount)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "secrets-guard: vault:", err)
+		// Continue with a nil-provider resolver so refs error (safe deny).
+		resolver, _ = vault.Select("auto", vault.NewRunner(), cfg.OPAccount)
+	}
+
+	in, err := readInput(os.Stdin)
+	if err != nil {
+		// Malformed input: do nothing (exit 0, no decision) to avoid breaking
+		// the user's session on an unexpected payload.
+		fmt.Fprintln(os.Stderr, "secrets-guard: bad input:", err)
+		return
+	}
+
+	// SessionStart: make the CLI available in the developer's OWN terminal
+	// (Linux/macOS/Windows) automatically, so just installing/enabling the plugin
+	// — including when enforced via managed-settings.json — is enough to get the
+	// `secrets-guard` command on PATH without any manual step. Idempotent,
+	// best-effort and silent: it never writes to the model's context and never
+	// breaks the session.
+	if in.HookEventName == "SessionStart" {
+		if _, err := selfInstall("", true); err != nil {
+			fmt.Fprintln(os.Stderr, "secrets-guard: self-install:", err)
+		}
+		return // no stdout → nothing injected into context
+	}
+
+	self, err := os.Executable()
+	if err != nil {
+		self = ""
+	}
+	h := hook.NewHandler(toHookConfig(cfg, resolver.ProviderName()), eng, red, resolver, cache.New(), self)
+	out := h.Handle(in)
+
+	audit.New(cfg.AuditLogPath).Log(audit.Record{
+		SessionID:  in.SessionID,
+		Event:      h.Last.Event,
+		Action:     h.Last.Action,
+		Categories: h.Last.Categories,
+		Count:      h.Last.Count,
+	})
+
+	if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {
+		fmt.Fprintln(os.Stderr, "secrets-guard: encode:", err)
+	}
+}
+
+func runScan() {
+	cfg := config.Load(os.Getenv)
+	eng := buildEngine(cfg)
+	data, _ := io.ReadAll(bufio.NewReader(os.Stdin))
+	findings := eng.Scan(string(data))
+	for _, f := range findings {
+		fmt.Printf("%s\t[%d:%d]\n", f.Category, f.Start, f.End)
+	}
+	if len(findings) == 0 {
+		fmt.Fprintln(os.Stderr, "no secrets detected")
+	}
+}
+
+// runRedactStream reads stdin, redacts secrets and writes the result to stdout.
+// It is used to wrap a Bash command so its output is redacted at the source,
+// since Claude Code 2.1.x does not honor PostToolUse output rewriting.
+func runRedactStream() {
+	cfg := config.Load(os.Getenv)
+	eng := buildEngine(cfg)
+	red := redact.New(eng)
+	data, _ := io.ReadAll(bufio.NewReader(os.Stdin))
+	text := string(data)
+
+	// Redact this session's already-resolved secret values (in any reversible
+	// encoding). Prefer the in-memory cache daemon; fall back to re-resolving the
+	// recorded references in ephemeral memory if the daemon is unavailable.
+	if session := os.Getenv("SG_SESSION"); session != "" {
+		if _, red, ok := cache.New().Scan(session, text); ok {
+			text = red
+		} else if paths := seen.LoadPaths(session); len(paths) > 0 {
+			if resolver, err := vault.Select(cfg.VaultProvider, vault.NewRunner(), cfg.OPAccount); err == nil {
+				if vals := resolver.ResolveValues(paths); len(vals) > 0 {
+					text, _ = seen.Redact(text, vals)
+				}
+			}
+		}
+	}
+
+	// Then the built-in high-confidence detectors.
+	out, _ := red.Redact(text)
+	fmt.Fprint(os.Stdout, out)
+}
+
+// runMCP serves the vault-catalog MCP tools. The tools list accounts, items and
+// fields and return references (op:// / keeper://) and labels — never values.
+func runMCP() {
+	cfg := config.Load(os.Getenv)
+
+	cat := func() (catalog.Catalog, error) {
+		return catalog.Select(cfg.VaultProvider, vault.NewRunner(), cfg.OPAccount)
+	}
+	jsonText := func(v any) (string, error) {
+		b, err := json.MarshalIndent(v, "", "  ")
+		return string(b), err
+	}
+	argStr := func(args map[string]any, k string) string {
+		if s, ok := args[k].(string); ok {
+			return s
+		}
+		return ""
+	}
+	argInt := func(args map[string]any, k string, def int) int {
+		switch v := args[k].(type) {
+		case float64:
+			return int(v)
+		case int:
+			return v
+		}
+		return def
+	}
+	// filterCap narrows items by a case-insensitive title query and caps the
+	// result, so a huge shared vault never blows the token budget. The payload
+	// reports total/returned/truncated so Claude can refine the query or vault.
+	filterCap := func(items []catalog.Item, query string, limit int) any {
+		if query != "" {
+			q := strings.ToLower(query)
+			f := items[:0:0]
+			for _, it := range items {
+				if strings.Contains(strings.ToLower(it.Title), q) {
+					f = append(f, it)
+				}
+			}
+			items = f
+		}
+		total := len(items)
+		if limit <= 0 {
+			limit = 50
+		}
+		truncated := total > limit
+		if truncated {
+			items = items[:limit]
+		}
+		return map[string]any{"total": total, "returned": len(items), "truncated": truncated, "items": items}
+	}
+	acctProp := map[string]any{"type": "string", "description": "Optional 1Password account id (from list_accounts; the uuid, not the url)."}
+	vaultProp := map[string]any{"type": "string", "description": "Optional vault name/id to narrow the search (recommended for large shared vaults)."}
+	limitProp := map[string]any{"type": "number", "description": "Max items to return (default 50)."}
+
+	tools := []mcp.Tool{
+		{
+			Name:        "vault_status",
+			Description: "Report which secret vault (Keeper or 1Password) is active and reachable.",
+			Handler: func(map[string]any) (string, error) {
+				c, err := cat()
+				if err != nil {
+					return jsonText(map[string]any{"available": false, "error": err.Error()})
+				}
+				return jsonText(map[string]any{"available": true, "provider": c.Provider()})
+			},
+		},
+		{
+			Name:        "list_accounts",
+			Description: "List the vault accounts available on this machine (no credentials). Use an account id with the other tools and inside references.",
+			Handler: func(map[string]any) (string, error) {
+				c, err := cat()
+				if err != nil {
+					return "", err
+				}
+				accts, err := c.ListAccounts()
+				if err != nil {
+					return "", err
+				}
+				return jsonText(accts)
+			},
+		},
+		{
+			Name:        "list_vaults",
+			Description: "List the vaults of an account (1Password) so you can narrow list_secrets/search_secrets to one vault. Returns names/ids, never secrets.",
+			InputSchema: map[string]any{"type": "object", "properties": map[string]any{"account": acctProp}},
+			Handler: func(args map[string]any) (string, error) {
+				c, err := cat()
+				if err != nil {
+					return "", err
+				}
+				vaults, err := c.ListVaults(argStr(args, "account"))
+				if err != nil {
+					return "", err
+				}
+				return jsonText(vaults)
+			},
+		},
+		{
+			Name: "search_secrets",
+			Description: "Search secret items whose title matches a query (case-insensitive) — never their values. Prefer this over list_secrets for large vaults. " +
+				"Returns total/returned/truncated; narrow with 'vault' or refine 'query' if truncated.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"query":   map[string]any{"type": "string", "description": "Substring to match against item titles."},
+					"account": acctProp, "vault": vaultProp, "limit": limitProp,
+				},
+				"required": []any{"query"},
+			},
+			Handler: func(args map[string]any) (string, error) {
+				query := argStr(args, "query")
+				if query == "" {
+					return "", fmt.Errorf("missing required argument 'query'")
+				}
+				c, err := cat()
+				if err != nil {
+					return "", err
+				}
+				items, err := c.ListItems(argStr(args, "account"), argStr(args, "vault"))
+				if err != nil {
+					return "", err
+				}
+				return jsonText(filterCap(items, query, argInt(args, "limit", 50)))
+			},
+		},
+		{
+			Name: "list_secrets",
+			Description: "List secret items (titles, ids, vault, type) — never their values. For large shared vaults pass 'vault' to narrow, or use search_secrets. " +
+				"Returns total/returned/truncated.",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"account": acctProp, "vault": vaultProp, "limit": limitProp},
+			},
+			Handler: func(args map[string]any) (string, error) {
+				c, err := cat()
+				if err != nil {
+					return "", err
+				}
+				items, err := c.ListItems(argStr(args, "account"), argStr(args, "vault"))
+				if err != nil {
+					return "", err
+				}
+				return jsonText(filterCap(items, "", argInt(args, "limit", 50)))
+			},
+		},
+		{
+			Name:        "list_fields",
+			Description: "List an item's fields with their ready-to-use reference paths (op:// / keeper://) — never the values. Put a returned reference into a tool call and secrets-guard resolves it at execution.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"item":    map[string]any{"type": "string", "description": "Item title or id (from list_secrets/search_secrets)."},
+					"account": acctProp, "vault": vaultProp,
+				},
+				"required": []any{"item"},
+			},
+			Handler: func(args map[string]any) (string, error) {
+				item := argStr(args, "item")
+				if item == "" {
+					return "", fmt.Errorf("missing required argument 'item'")
+				}
+				c, err := cat()
+				if err != nil {
+					return "", err
+				}
+				fields, err := c.ListFields(item, argStr(args, "account"), argStr(args, "vault"))
+				if err != nil {
+					return "", err
+				}
+				return jsonText(fields)
+			},
+		},
+	}
+
+	if err := mcp.NewServer("secrets-guard", version, tools).Serve(os.Stdin, os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, "secrets-guard mcp:", err)
+	}
+}
+
+// runRun is the op-run / ksm-exec equivalent: it loads env vars (and optional
+// .env files) that hold vault references (op:// / keeper://), resolves them in
+// memory, injects the real values as environment variables into the child
+// process, and runs it. The secret values exist only in the child's memory —
+// never written to disk. Usage:
+//
+//	secrets-guard run [--env-file FILE]... -- COMMAND [ARGS...]
+func runRun() {
+	args := os.Args[2:]
+	var envFiles []string
+	i := 0
+	for i < len(args) {
+		if args[i] == "--env-file" && i+1 < len(args) {
+			envFiles = append(envFiles, args[i+1])
+			i += 2
+			continue
+		}
+		if args[i] == "--" {
+			i++
+		}
+		break
+	}
+	cmdArgs := args[i:]
+	if len(cmdArgs) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: secrets-guard run [--env-file FILE]... -- COMMAND [ARGS...]")
+		os.Exit(2)
+	}
+
+	cfg := config.Load(os.Getenv)
+	resolver, err := vault.Select(cfg.VaultProvider, vault.NewRunner(), cfg.OPAccount)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "secrets-guard run:", err)
+		os.Exit(1)
+	}
+
+	env := environMap()
+	for _, f := range envFiles {
+		if err := loadEnvFile(f, env); err != nil {
+			fmt.Fprintln(os.Stderr, "secrets-guard run:", err)
+			os.Exit(1)
+		}
+	}
+
+	var resolvedVals, resolvedRefs []string
+	for k, v := range env {
+		refs := vault.FindReferences(v)
+		if len(refs) == 0 {
+			continue
+		}
+		out, vals, rerr := resolver.ResolveString(v)
+		if rerr != nil {
+			fmt.Fprintf(os.Stderr, "secrets-guard run: %s: %v\n", k, rerr)
+			os.Exit(1)
+		}
+		env[k] = out
+		resolvedVals = append(resolvedVals, vals...)
+		resolvedRefs = append(resolvedRefs, refs...)
+	}
+
+	// Register resolved values so they are redacted if the program prints them.
+	if session := os.Getenv("SG_SESSION"); session != "" && len(resolvedVals) > 0 {
+		cache.New().Add(session, resolvedVals)
+		seen.RecordPaths(session, resolvedRefs)
+	}
+
+	c := exec.Command(cmdArgs[0], cmdArgs[1:]...)
+	c.Env = mapToEnv(env)
+	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := c.Run(); err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			os.Exit(ee.ExitCode())
+		}
+		fmt.Fprintln(os.Stderr, "secrets-guard run:", err)
+		os.Exit(1)
+	}
+}
+
+// runRead resolves one or more vault references to their values and prints each
+// on its own line — the op-read / ksm-secret-notation equivalent, unified across
+// both vaults (and honoring op://<account>: prefixes). Usage:
+//
+//	secrets-guard read op://Private/db/password [keeper://UID/field/password ...]
+func runRead() {
+	refs := os.Args[2:]
+	if len(refs) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: secrets-guard read REFERENCE [REFERENCE...]")
+		os.Exit(2)
+	}
+	cfg := config.Load(os.Getenv)
+	resolver, err := vault.Select(cfg.VaultProvider, vault.NewRunner(), cfg.OPAccount)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "secrets-guard read:", err)
+		os.Exit(1)
+	}
+	for _, ref := range refs {
+		out, _, err := resolver.ResolveString(ref)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "secrets-guard read:", err)
+			os.Exit(1)
+		}
+		fmt.Println(out)
+	}
+}
+
+// runInstall copies the running binary to a user-level bin directory (default
+// ~/.local/bin) as `secrets-guard`, so it is available on the developer's shell
+// PATH for the manual / start.sh workflow — no administrator privileges needed.
+//
+//	secrets-guard install [--dir DIR]
+func runInstall() {
+	dir := ""
+	args := os.Args[2:]
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--dir" && i+1 < len(args) {
+			dir = args[i+1]
+			i++
+		}
+	}
+	dst, err := selfInstall(dir, false)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "secrets-guard install:", err)
+		os.Exit(1)
+	}
+	fmt.Printf("✓ Installed secrets-guard to %s\n", dst)
+	printPathHint(filepath.Dir(dst))
+}
+
+func copyFile(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+func onPath(dir string) bool {
+	for _, p := range filepath.SplitList(os.Getenv("PATH")) {
+		if p == dir {
+			return true
+		}
+	}
+	return false
+}
+
+func environMap() map[string]string {
+	m := make(map[string]string)
+	for _, kv := range os.Environ() {
+		if i := strings.IndexByte(kv, '='); i >= 0 {
+			m[kv[:i]] = kv[i+1:]
+		}
+	}
+	return m
+}
+
+func mapToEnv(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k, v := range m {
+		out = append(out, k+"="+v)
+	}
+	return out
+}
+
+func loadEnvFile(path string, env map[string]string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		eq := strings.IndexByte(line, '=')
+		if eq < 0 {
+			continue
+		}
+		k := strings.TrimSpace(line[:eq])
+		v := strings.Trim(strings.TrimSpace(line[eq+1:]), `"'`)
+		if k != "" {
+			env[k] = v
+		}
+	}
+	return sc.Err()
+}
+
+func readInput(r io.Reader) (hook.Input, error) {
+	var in hook.Input
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return in, err
+	}
+	if len(data) == 0 {
+		return in, fmt.Errorf("empty input")
+	}
+	err = json.Unmarshal(data, &in)
+	return in, err
+}
+
+func toHookConfig(c config.Config, vaultName string) hook.Config {
+	return hook.Config{
+		BlockOnPromptSecret: c.BlockOnPromptSecret,
+		ToolInputPolicy:     c.ToolInputPolicy,
+		ToolOutputMode:      c.ToolOutputMode,
+		CommandReferences:   c.CommandReferences,
+		VaultName:           vaultName,
+	}
+}
