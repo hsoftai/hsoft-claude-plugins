@@ -19,8 +19,8 @@ func TestScan_NoFalsePositives(t *testing.T) {
 		"op://development/GitHub/credentials/personal_token?attribute=otp",
 		"akv://my-vault/db-password",
 		// Natural-language credentials — intentionally NOT detected (no block).
-		"la contraseña es Bi0s2026Prod!",
-		"the password is Adm1n#Bios2026",
+		"la contraseña es Pr0dPass2026!",
+		"the password is Adm1n#Str0ng2026",
 		"usa estas credenciales para entrar: Str0ngP4ss!",
 		"db_password: hunter2longvalue",
 		"password=Sup3rSecret123",

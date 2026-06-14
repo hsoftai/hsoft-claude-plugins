@@ -59,3 +59,36 @@ func TestContains_ShortValueIgnored(t *testing.T) {
 		t.Fatal("values shorter than minLen must be ignored to avoid noise")
 	}
 }
+
+// CTF-5 regression: cheap reversible transforms (reverse, case-fold) an
+// exfiltrator might use to dodge substring DLP are detected/redacted.
+func TestContainsAndRedact_CheapTransforms(t *testing.T) {
+	secret := "S3cr3tP4ssw0rd"
+	v := []string{secret}
+
+	rev := func(s string) string {
+		b := []byte(s)
+		for i, j := 0, len(b)-1; i < j; i, j = i+1, j-1 {
+			b[i], b[j] = b[j], b[i]
+		}
+		return string(b)
+	}
+	for name, t1 := range map[string]string{
+		"reversed":  rev(secret),
+		"lowercase": strings.ToLower(secret),
+		"uppercase": strings.ToUpper(secret),
+	} {
+		text := "exfil: " + t1 + " end"
+		if !Contains(text, v) {
+			t.Errorf("%s transform not detected: %s", name, t1)
+		}
+		if out, n := Redact(text, v); n == 0 || strings.Contains(out, t1) {
+			t.Errorf("%s transform not redacted: %q", name, out)
+		}
+	}
+
+	// CTF-4 (minLen): a 4-char secret is now tracked (no longer ignored).
+	if !Contains("pin is 4tz9 ok", []string{"4tz9"}) {
+		t.Fatal("4-char secret should be tracked after minLen=4")
+	}
+}

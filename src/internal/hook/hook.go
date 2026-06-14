@@ -13,8 +13,10 @@ package hook
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/hsoftai/hsoft-claude-plugins/internal/detect"
@@ -78,6 +80,10 @@ type Config struct {
 	ToolOutputMode      string // redact | block | off
 	CommandReferences   string // inject | keep
 	VaultName           string // active vault: "keeper" | "1password" | "none"
+	// BrokerMode is true on a Cowork host: tools run in a VM, so the value must
+	// not be injected into the command (it would leak to the VM / the host
+	// transcript). References are rewritten to a runtime broker fetch in the VM.
+	BrokerMode bool
 }
 
 // Decision is a structured audit record produced by Handle (no secret values).
@@ -276,6 +282,22 @@ func (h *Handler) handlePreTool(in Input) Output {
 		seen.RecordPaths(in.SessionID, resolvedRefs)
 	}
 
+	// In broker mode the host does not resolve, so populate the broker's allowlist
+	// with LEAST PRIVILEGE. The ONLY value channel into the VM is
+	// `secrets-guard run --env-file .env`, so the only thing that needs authorizing
+	// is a reference written as a `KEY=op://…` value into an env/dotenv file via the
+	// Write/Edit tool. We deliberately do NOT authorize from:
+	//   - bare Bash commands (a reference is kept literal and never fetched inline,
+	//     so `echo op://victim` must not mint an allowlist entry — confused deputy);
+	//   - arbitrary prose in a *.env file (only real KEY=ref lines count).
+	// This bounds what any rogue/curious VM process can pull to exactly the secrets
+	// the workflow declared in its env files.
+	if h.cfg.BrokerMode && isEnvFileWrite(in.ToolName, in.ToolInput) {
+		if refs := h.envFileRefs(in.ToolInput); len(refs) > 0 {
+			seen.RecordPaths(in.SessionID, refs)
+		}
+	}
+
 	// `injected` is true only when a value actually replaced a reference in the
 	// command body (vs. resolved-internally-but-kept-literal, which still tracks
 	// the value for output redaction but leaves the reference in place).
@@ -284,7 +306,7 @@ func (h *Handler) handlePreTool(in Input) Output {
 	// 3) For Bash in redact mode, wrap the command so its output is redacted at
 	// the source (PostToolUse output rewriting is not honored by Claude Code).
 	wrapped := false
-	if in.ToolName == "Bash" && h.cfg.ToolOutputMode == "redact" && h.selfPath != "" {
+	if in.ToolName == "Bash" && h.cfg.ToolOutputMode == "redact" && h.selfPath != "" && !h.cfg.BrokerMode {
 		base := updated
 		if base == nil {
 			base = in.ToolInput
@@ -327,18 +349,17 @@ func (h *Handler) handlePostTool(in Input) Output {
 
 	// A value resolved earlier this session reappearing in the output (in any
 	// encoding) is a leak — e.g. the model read back a file the hook resolved
-	// into. Bash output is already redacted at the source by the wrap, so only
-	// check the other tools here.
-	wrappedBash := in.ToolName == "Bash" && h.cfg.ToolOutputMode == "redact"
-	if !wrappedBash {
-		if h.knownInText(in.SessionID, text) {
-			h.Last = Decision{Event: "PostToolUse", Action: "block", Count: 1}
-			return Output{
-				Decision: "block",
-				Reason:   "secrets-guard: resolved secret present in tool output",
-				SystemMessage: "🛑 secrets-guard retuvo la salida: contiene un secreto ya resuelto en esta sesión " +
-					"(posible fuga al leerlo de vuelta). El valor no se entregó al modelo; usa la referencia de bóveda.",
-			}
+	// into, or a Bash command defeated the source-side redaction wrap. We ALWAYS
+	// check here (including for wrapped Bash) as a server-side backstop: if the
+	// wrap worked the output is already redacted and this finds nothing; if the
+	// wrap was bypassed, the leak is blocked here.
+	if h.knownInText(in.SessionID, text) {
+		h.Last = Decision{Event: "PostToolUse", Action: "block", Count: 1}
+		return Output{
+			Decision: "block",
+			Reason:   "secrets-guard: resolved secret present in tool output",
+			SystemMessage: "🛑 secrets-guard retuvo la salida: contiene un secreto ya resuelto en esta sesión " +
+				"(posible fuga al leerlo de vuelta). El valor no se entregó al modelo; usa la referencia de bóveda.",
 		}
 	}
 
@@ -413,9 +434,22 @@ func (h *Handler) processBashCommand(cmd string) (newCmd string, refs []string, 
 	out := refWithEscapeRe.ReplaceAllStringFunc(cmd, func(match string) string {
 		sub := refWithEscapeRe.FindStringSubmatch(match)
 		escaped, ref := sub[1] == `\`, sub[2]
-		// Always resolve internally so the value is tracked for output redaction.
-		resolved, rv, err := h.vault.ResolveString(ref)
 		refs = append(refs, ref)
+
+		if h.cfg.BrokerMode {
+			// Cowork: the tool runs in the VM. NEVER make the value shell-visible —
+			// any value placed in the VM shell (even via $(secrets-guard read …))
+			// can be redirected to the VM's disk (`… > .env`, heredoc, tee). Keep
+			// EVERY reference literal; the value is delivered only through
+			// `secrets-guard run --env-file`, which injects it into the child
+			// process's environment (memory), never into the shell or a file. The
+			// reference is recorded (by the caller) into the broker allowlist.
+			return ref
+		}
+
+		// Local mode: always resolve internally so the value is tracked for output
+		// redaction, even when the reference is kept literal in the command.
+		resolved, rv, err := h.vault.ResolveString(ref)
 		vals = append(vals, rv...)
 		if escaped || keepAll {
 			return ref // keep literal, stripping any opt-out backslash
@@ -441,12 +475,15 @@ func wrapBashCommand(toolInput json.RawMessage, selfPath, session string) (json.
 		return nil, false
 	}
 	q := shellSingleQuote(selfPath)
-	// Export SG_SESSION for the whole command so (a) redact-stream can re-derive
-	// and redact this session's values, and (b) a `secrets-guard run` invoked
-	// inside the command can register the values it resolves with the cache.
-	m["command"] = "export SG_SESSION=" + shellSingleQuote(session) + "; " +
+	qs := shellSingleQuote(session)
+	// Export SG_SESSION for the whole command so a `secrets-guard run` invoked
+	// inside CMD can register the values it resolves. But CMD could clobber
+	// SG_SESSION (`unset SG_SESSION; …`) to disable redaction, so the redact-stream
+	// children get the session on their OWN command line (immune to CMD's env).
+	m["command"] = "export SG_SESSION=" + qs + "; " +
 		"__sg_o=$(mktemp); __sg_e=$(mktemp); { " + cmd + "; } >\"$__sg_o\" 2>\"$__sg_e\"; __sg_rc=$?; " +
-		q + " redact-stream <\"$__sg_o\"; " + q + " redact-stream <\"$__sg_e\" >&2; " +
+		"SG_SESSION=" + qs + " " + q + " redact-stream <\"$__sg_o\"; " +
+		"SG_SESSION=" + qs + " " + q + " redact-stream <\"$__sg_e\" >&2; " +
 		"rm -f \"$__sg_o\" \"$__sg_e\"; exit $__sg_rc"
 	b, err := json.Marshal(m)
 	if err != nil {
@@ -458,6 +495,67 @@ func wrapBashCommand(toolInput json.RawMessage, selfPath, session string) (json.
 // shellSingleQuote wraps s in single quotes, escaping embedded single quotes.
 func shellSingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// isEnvFileWrite reports whether a Write/Edit tool writes to an env/dotenv file —
+// the only file content from which the broker allowlist is populated. It is
+// restricted to file-content tools so a Bash command cannot pose as an env-file
+// write.
+func isEnvFileWrite(toolName string, toolInput json.RawMessage) bool {
+	// Only Write/Edit, whose content envFileRefs actually parses (content /
+	// new_string). MultiEdit/NotebookEdit use different shapes; we deliberately do
+	// NOT claim to authorize through them (fail-closed: the agent uses Write).
+	switch toolName {
+	case "Write", "Edit":
+	default:
+		return false
+	}
+	var m map[string]any
+	if json.Unmarshal(toolInput, &m) != nil {
+		return false
+	}
+	for _, k := range []string{"file_path", "path", "filePath", "notebook_path"} {
+		if p, ok := m[k].(string); ok && looksLikeEnvFile(p) {
+			return true
+		}
+	}
+	return false
+}
+
+// looksLikeEnvFile matches .env, env, .env.<x> and *.env (case-insensitive).
+func looksLikeEnvFile(path string) bool {
+	base := strings.ToLower(filepath.Base(strings.TrimSpace(path)))
+	return base == ".env" || base == "env" ||
+		strings.HasPrefix(base, ".env.") || strings.HasSuffix(base, ".env")
+}
+
+// envFileRefs extracts vault references that appear as the VALUE of a `KEY=value`
+// line in the written content — never references in comments or prose — so only
+// real env entries authorize the broker allowlist.
+func (h *Handler) envFileRefs(toolInput json.RawMessage) []string {
+	var m map[string]any
+	if json.Unmarshal(toolInput, &m) != nil {
+		return nil
+	}
+	content, _ := m["content"].(string)
+	if content == "" {
+		content, _ = m["new_string"].(string) // Edit / MultiEdit
+	}
+	var out []string
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		eq := strings.IndexByte(line, '=')
+		if eq < 0 {
+			continue
+		}
+		val := strings.Trim(strings.TrimSpace(line[eq+1:]), `"'`)
+		out = append(out, h.vault.FindRefs(val)...)
+	}
+	return out
 }
 
 func warnMsg(cats []string, vaultName string) string {
@@ -494,6 +592,12 @@ func collectStrings(raw json.RawMessage) []string {
 		switch t := n.(type) {
 		case string:
 			out = append(out, t)
+		case float64:
+			// Numbers are leaves too: a purely numeric secret (PIN/token) placed as
+			// a JSON number must still be seen by the known-value/detector checks.
+			out = append(out, strconv.FormatFloat(t, 'f', -1, 64))
+		case bool:
+			out = append(out, strconv.FormatBool(t))
 		case []any:
 			for _, e := range t {
 				walk(e)
@@ -505,6 +609,7 @@ func collectStrings(raw json.RawMessage) []string {
 			}
 			sort.Strings(keys)
 			for _, k := range keys {
+				out = append(out, k) // object keys can carry a value too
 				walk(t[k])
 			}
 		}

@@ -48,7 +48,7 @@ func TestOnePassword_Resolve(t *testing.T) {
 	m := &mockRunner{
 		present: map[string]bool{"op": true},
 		outputs: map[string]string{
-			"op read op://Private/AWS/password": "hunter2\n",
+			"op read -- op://Private/AWS/password": "hunter2\n",
 		},
 	}
 	p := newOnePassword(m, "")
@@ -91,7 +91,7 @@ func TestOnePassword_ResolveWithAccount(t *testing.T) {
 	m := &mockRunner{
 		present: map[string]bool{"op": true},
 		outputs: map[string]string{
-			"op read --account my.1password.com op://Private/test-claude/password": "TOPsecret\n",
+			"op read --account my.1password.com -- op://Private/test-claude/password": "TOPsecret\n",
 		},
 	}
 	r, _ := Select("1password", m, "my.1password.com")
@@ -108,7 +108,7 @@ func TestResolveString_AccountInReference(t *testing.T) {
 	m := &mockRunner{
 		present: map[string]bool{"op": true},
 		outputs: map[string]string{
-			"op read --account 7FWKE op://Private/test-claude/password": "REALVAL\n",
+			"op read --account 7FWKE -- op://Private/test-claude/password": "REALVAL\n",
 		},
 	}
 	r, _ := Select("1password", m, "") // no global account configured
@@ -124,7 +124,7 @@ func TestResolveString_EmailAccountInReference(t *testing.T) {
 	m := &mockRunner{
 		present: map[string]bool{"op": true},
 		outputs: map[string]string{
-			"op read --account alexis@portermetrics.com op://Private/x/y": "V\n",
+			"op read --account alexis@portermetrics.com -- op://Private/x/y": "V\n",
 		},
 	}
 	r, _ := Select("1password", m, "global") // global should be overridden
@@ -154,8 +154,8 @@ func TestOnePassword_ResolveSectionAndQuery(t *testing.T) {
 	m := &mockRunner{
 		present: map[string]bool{"op": true},
 		outputs: map[string]string{
-			"op read op://development/GitHub/credentials/personal_token": "ghtok\n",
-			"op read op://Private/Login/password?attribute=otp":          "123456\n",
+			"op read -- op://development/GitHub/credentials/personal_token": "ghtok\n",
+			"op read -- op://Private/Login/password?attribute=otp":          "123456\n",
 		},
 	}
 	r, _ := Select("1password", m, "")

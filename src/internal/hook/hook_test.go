@@ -9,6 +9,7 @@ import (
 
 	"github.com/hsoftai/hsoft-claude-plugins/internal/detect"
 	"github.com/hsoftai/hsoft-claude-plugins/internal/redact"
+	"github.com/hsoftai/hsoft-claude-plugins/internal/seen"
 )
 
 // TestMain isolates the per-session ledger (internal/seen) to a temp dir.
@@ -55,6 +56,19 @@ type noopCache struct{}
 func (noopCache) Add(string, []string)                     {}
 func (noopCache) Scan(string, string) (bool, string, bool) { return false, "", false }
 func (noopCache) Shutdown(string)                          {}
+
+// knownCache reports the test secret value as a known session value, exercising
+// the leak-detection path without a real daemon.
+type knownCache struct{}
+
+func (knownCache) Add(string, []string) {}
+func (knownCache) Scan(_, text string) (bool, string, bool) {
+	if strings.Contains(text, "RESOLVED_SECRET") {
+		return true, strings.ReplaceAll(text, "RESOLVED_SECRET", "[REDACTED]"), true
+	}
+	return false, text, true
+}
+func (knownCache) Shutdown(string) {}
 
 func newHandler(cfg Config) *Handler {
 	eng := detect.New()
@@ -227,6 +241,107 @@ func TestPreToolUse_CommandReferencesKeep(t *testing.T) {
 	}
 }
 
+// CTF-2 regression: in broker mode the value must NEVER become shell-visible in
+// the VM — no injection AND no `$(secrets-guard read …)` rewrite (which, inside a
+// heredoc/redirect, would land the value on the VM's disk). The reference is kept
+// literal; the command is not wrapped. The only value channel is `secrets-guard
+// run --env-file` (injects into the child env, never the shell or a file).
+func TestPreToolUse_BrokerModeKeepsReferenceLiteral(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.BrokerMode = true
+	h := newHandler(cfg)
+	out := h.Handle(Input{
+		HookEventName: "PreToolUse",
+		ToolName:      "Bash",
+		ToolInput:     json.RawMessage(`{"command":"cat > .env <<EOF\nDB=op://v/i/token\nEOF"}`),
+	})
+	// No rewrite at all: the command is unchanged (or carries no UpdatedInput).
+	if out.HookSpecificOutput != nil && len(out.HookSpecificOutput.UpdatedInput) > 0 {
+		var ti struct {
+			Command string `json:"command"`
+		}
+		_ = json.Unmarshal(out.HookSpecificOutput.UpdatedInput, &ti)
+		if strings.Contains(ti.Command, "secrets-guard read") {
+			t.Fatalf("broker mode must NOT rewrite to a shell-visible read (disk-leak): %q", ti.Command)
+		}
+		if strings.Contains(ti.Command, "RESOLVED_SECRET") {
+			t.Fatalf("value must NOT be injected in broker mode: %q", ti.Command)
+		}
+	}
+}
+
+// In broker mode there is no Bash output wrap, so PostToolUse must block Bash
+// output that leaks a known resolved value.
+func TestPostToolUse_BrokerModeBlocksBashLeak(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.BrokerMode = true
+	eng := detect.New()
+	// A resolver/cache that reports the value as known so the leak is detected.
+	h := NewHandler(cfg, eng, redact.New(eng), fakeResolver{value: "RESOLVED_SECRET"}, knownCache{}, "/opt/sg/bin/secrets-guard")
+	out := h.Handle(Input{
+		HookEventName: "PostToolUse",
+		ToolName:      "Bash",
+		SessionID:     "s1",
+		ToolResponse:  json.RawMessage(`"the value is RESOLVED_SECRET oops"`),
+	})
+	if out.Decision != "block" {
+		t.Fatalf("broker-mode Bash leak must be blocked, got %+v", out)
+	}
+}
+
+// CTF-1 regression: in broker mode a reference that merely appears as text in an
+// arbitrary file (NOTES.md) must NOT be authorized into the broker allowlist
+// (confused-deputy exfiltration). Only executed Bash commands and env-file writes
+// authorize references.
+func TestPreToolUse_BrokerAllowlistLeastPrivilege(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.BrokerMode = true
+	sess := "ctf1-" + t.Name()
+
+	loaded := func() []string { return seen.LoadPaths(sess) }
+	contains := func(want string) bool {
+		for _, p := range loaded() {
+			if p == want {
+				return true
+			}
+		}
+		return false
+	}
+
+	h := newHandler(cfg)
+	pre := func(tool, input string) {
+		h.Handle(Input{HookEventName: "PreToolUse", ToolName: tool, SessionID: sess, ToolInput: json.RawMessage(input)})
+	}
+
+	// (a) Arbitrary file content with a reference → NOT authorized.
+	pre("Write", `{"file_path":"NOTES.md","content":"key: op://Prod/root-ca/private_key"}`)
+	if contains("op://Prod/root-ca/private_key") {
+		t.Fatal("arbitrary file content must NOT authorize a reference (confused deputy)")
+	}
+
+	// (b) A real KEY=ref line in a .env file (Write) → authorized.
+	pre("Write", `{"file_path":"config/.env","content":"DB=op://Prod/db/password"}`)
+	if !contains("op://Prod/db/password") {
+		t.Fatal("a KEY=ref env-file line should authorize its reference")
+	}
+
+	// (c) CTF-3: a reference merely mentioned in a Bash command → NOT authorized
+	// (bare commands keep refs literal and never fetch them inline).
+	pre("Bash", `{"command":"echo 'see op://Prod/api/token for later'"}`)
+	if contains("op://Prod/api/token") {
+		t.Fatal("a reference in a Bash command must NOT authorize it (self-minted allowlist)")
+	}
+
+	// (d) CTF-3: a reference as PROSE inside a *.env file → NOT authorized
+	// (only KEY=ref lines count, not arbitrary content).
+	pre("Write", `{"file_path":"x.env","content":"# please fetch op://Prod/ssh/key thanks"}`)
+	if contains("op://Prod/ssh/key") {
+		t.Fatal("prose in a .env file must NOT authorize a reference")
+	}
+
+	seen.Clear(sess)
+}
+
 func TestPreToolUse_AllowsCleanCommand(t *testing.T) {
 	cfg := defaultCfg()
 	cfg.ToolOutputMode = "off" // no wrapping, just check it is not denied
@@ -246,6 +361,7 @@ func TestPreToolUse_WrapsBashOutputInRedactMode(t *testing.T) {
 	out := h.Handle(Input{
 		HookEventName: "PreToolUse",
 		ToolName:      "Bash",
+		SessionID:     "s1",
 		ToolInput:     json.RawMessage(`{"command":"cat config.txt"}`),
 	})
 	if out.HookSpecificOutput == nil || len(out.HookSpecificOutput.UpdatedInput) == 0 {
@@ -262,6 +378,49 @@ func TestPreToolUse_WrapsBashOutputInRedactMode(t *testing.T) {
 	}
 	if !strings.Contains(ti.Command, "cat config.txt") {
 		t.Fatalf("original command lost: %q", ti.Command)
+	}
+	// CTF-8: redact-stream must get SG_SESSION on its own command line so the
+	// wrapped command cannot disable redaction by mutating the env (`unset
+	// SG_SESSION`). Expect `SG_SESSION='…' '<self>' redact-stream`.
+	if !strings.Contains(ti.Command, "SG_SESSION='s1' '/opt/sg/bin/secrets-guard' redact-stream") {
+		t.Fatalf("redact-stream not pinned to an inline SG_SESSION: %q", ti.Command)
+	}
+}
+
+// CTF-12 verification: the broker-mode backstop works through the REAL seen
+// ledger (not the knownCache stub). On the host, the broker's OnResolve records
+// the resolved reference in seen; PostToolUse re-derives the value via the vault
+// (host has the CLI) and blocks the echoed value. noopCache forces the seen
+// fallback path.
+func TestPostToolUse_BrokerBackstopViaSeenLedger(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.BrokerMode = true
+	h := newHandler(cfg) // fakeResolver resolves any ref to RESOLVED_SECRET; noopCache
+	sess := "ctf12-" + t.Name()
+	seen.RecordPaths(sess, []string{"op://Prod/db/password"}) // what the broker OnResolve records
+	defer seen.Clear(sess)
+
+	out := h.Handle(Input{
+		HookEventName: "PostToolUse", ToolName: "Bash", SessionID: sess,
+		ToolResponse: json.RawMessage(`"the child echoed RESOLVED_SECRET to stdout"`),
+	})
+	if out.Decision != "block" {
+		t.Fatalf("host PostToolUse must block a value re-derivable from the seen ledger, got %+v", out)
+	}
+}
+
+// CTF-8 backstop: PostToolUse blocks a known resolved value in Bash output even
+// in redact mode (in case the source-side wrap was defeated).
+func TestPostToolUse_BacksopBlocksWrappedBashLeak(t *testing.T) {
+	cfg := defaultCfg() // redact mode, local
+	eng := detect.New()
+	h := NewHandler(cfg, eng, redact.New(eng), fakeResolver{value: "RESOLVED_SECRET"}, knownCache{}, "/opt/sg/bin/secrets-guard")
+	out := h.Handle(Input{
+		HookEventName: "PostToolUse", ToolName: "Bash", SessionID: "s1",
+		ToolResponse: json.RawMessage(`"oops RESOLVED_SECRET leaked"`),
+	})
+	if out.Decision != "block" {
+		t.Fatalf("a defeated wrap must still be caught server-side, got %+v", out)
 	}
 }
 

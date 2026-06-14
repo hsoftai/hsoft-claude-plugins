@@ -54,11 +54,31 @@ func variants(v string) []string {
 	// raw bits (each byte as 8 bits)
 	add(toBits(b))
 
+	// Cheap reversible transforms an exfiltrator might use to dodge substring DLP
+	// (e.g. `… | rev`, case-folding). Arbitrary transforms (gzip, ROT-n, base-N)
+	// cannot be enumerated here and are covered by the network egress gateway.
+	add(reverseBytes(b))
+	if low := strings.ToLower(v); low != v {
+		add(low)
+	}
+	if up := strings.ToUpper(v); up != v {
+		add(up)
+	}
+
 	out := make([]string, 0, len(set))
 	for s := range set {
 		out = append(out, s)
 	}
 	return out
+}
+
+// reverseBytes returns b reversed (matches `rev` on ASCII secrets).
+func reverseBytes(b []byte) string {
+	r := make([]byte, len(b))
+	for i := range b {
+		r[len(b)-1-i] = b[i]
+	}
+	return string(r)
 }
 
 func toBits(b []byte) string {

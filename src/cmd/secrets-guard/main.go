@@ -53,6 +53,9 @@ func main() {
 		case "cache-daemon":
 			_ = cache.RunDaemon(os.Getenv("SG_SESSION"))
 			return
+		case "broker":
+			runBroker()
+			return
 		case "run":
 			runRun()
 			return
@@ -111,14 +114,24 @@ func runHook() {
 		if _, err := selfInstall("", true); err != nil {
 			fmt.Fprintln(os.Stderr, "secrets-guard: self-install:", err)
 		}
+		// Cowork: bring up the host broker so the VM can resolve references over
+		// the network (the VM has no vault CLI). No-op in plain Claude Code.
+		if shouldRunBroker(cfg) {
+			spawnBroker(cfg, in.SessionID)
+		}
 		return // no stdout → nothing injected into context
+	}
+
+	// On SessionEnd, remove the broker control-plane files from the spool.
+	if in.HookEventName == "SessionEnd" && shouldRunBroker(cfg) {
+		cleanupBroker(cfg, in.SessionID)
 	}
 
 	self, err := os.Executable()
 	if err != nil {
 		self = ""
 	}
-	h := hook.NewHandler(toHookConfig(cfg, resolver.ProviderName()), eng, red, resolver, cache.New(), self)
+	h := hook.NewHandler(toHookConfig(cfg, resolver.ProviderName(), shouldRunBroker(cfg)), eng, red, resolver, cache.New(), self)
 	out := h.Handle(in)
 
 	audit.New(cfg.AuditLogPath).Log(audit.Record{
@@ -386,11 +399,6 @@ func runRun() {
 	}
 
 	cfg := config.Load(os.Getenv)
-	resolver, err := vault.Select(cfg.VaultProvider, vault.NewRunner(), cfg.OPAccount)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "secrets-guard run:", err)
-		os.Exit(1)
-	}
 
 	env := environMap()
 	for _, f := range envFiles {
@@ -400,20 +408,39 @@ func runRun() {
 		}
 	}
 
-	var resolvedVals, resolvedRefs []string
+	// Collect every reference across the env values, resolve them once (locally on
+	// the host / in Claude Code, or via the host broker inside the Cowork VM), then
+	// substitute the values back. Fail-closed: if resolution fails, the child does
+	// not start.
+	var allRefs []string
+	refsByKey := map[string][]string{}
 	for k, v := range env {
-		refs := vault.FindReferences(v)
-		if len(refs) == 0 {
-			continue
+		if r := vault.FindReferences(v); len(r) > 0 {
+			refsByKey[k] = r
+			allRefs = append(allRefs, r...)
 		}
-		out, vals, rerr := resolver.ResolveString(v)
+	}
+	var resolvedVals, resolvedRefs []string
+	if len(allRefs) > 0 {
+		values, rerr := resolveRefs(cfg, allRefs)
 		if rerr != nil {
-			fmt.Fprintf(os.Stderr, "secrets-guard run: %s: %v\n", k, rerr)
+			fmt.Fprintln(os.Stderr, "secrets-guard run:", rerr)
 			os.Exit(1)
 		}
-		env[k] = out
-		resolvedVals = append(resolvedVals, vals...)
-		resolvedRefs = append(resolvedRefs, refs...)
+		for k, refs := range refsByKey {
+			s := env[k]
+			for _, ref := range refs {
+				val, ok := values[ref]
+				if !ok {
+					fmt.Fprintf(os.Stderr, "secrets-guard run: no se pudo resolver %s\n", ref)
+					os.Exit(1)
+				}
+				s = strings.ReplaceAll(s, ref, val)
+				resolvedVals = append(resolvedVals, val)
+				resolvedRefs = append(resolvedRefs, ref)
+			}
+			env[k] = s
+		}
 	}
 
 	// Register resolved values so they are redacted if the program prints them.
@@ -446,18 +473,26 @@ func runRead() {
 		os.Exit(2)
 	}
 	cfg := config.Load(os.Getenv)
-	resolver, err := vault.Select(cfg.VaultProvider, vault.NewRunner(), cfg.OPAccount)
+	// In the Cowork VM (broker mode) `read` would print the secret value to stdout,
+	// which the shell can redirect to the VM's disk. Refuse it: the only safe way to
+	// consume a secret in the VM is `secrets-guard run --env-file` (the value goes
+	// into the child process's environment, never the shell or a file).
+	if resolutionIsBroker(cfg) {
+		fmt.Fprintln(os.Stderr, "secrets-guard read no está disponible en la VM de Cowork (evita exponer el valor en el shell/disco). Usa: secrets-guard run --env-file .env -- <comando>")
+		os.Exit(2)
+	}
+	values, err := resolveRefs(cfg, refs)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "secrets-guard read:", err)
 		os.Exit(1)
 	}
 	for _, ref := range refs {
-		out, _, err := resolver.ResolveString(ref)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "secrets-guard read:", err)
+		val, ok := values[ref]
+		if !ok {
+			fmt.Fprintln(os.Stderr, "secrets-guard read: no se pudo resolver", ref)
 			os.Exit(1)
 		}
-		fmt.Println(out)
+		fmt.Println(val)
 	}
 }
 
@@ -567,12 +602,13 @@ func readInput(r io.Reader) (hook.Input, error) {
 	return in, err
 }
 
-func toHookConfig(c config.Config, vaultName string) hook.Config {
+func toHookConfig(c config.Config, vaultName string, brokerMode bool) hook.Config {
 	return hook.Config{
 		BlockOnPromptSecret: c.BlockOnPromptSecret,
 		ToolInputPolicy:     c.ToolInputPolicy,
 		ToolOutputMode:      c.ToolOutputMode,
 		CommandReferences:   c.CommandReferences,
 		VaultName:           vaultName,
+		BrokerMode:          brokerMode,
 	}
 }

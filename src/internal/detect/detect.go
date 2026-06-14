@@ -76,8 +76,11 @@ func (e *Engine) allowed(value string) bool {
 	return false
 }
 
-// vaultRefPattern matches the safe reference form used by supported vaults.
-const vaultRefPattern = `(?i)(?:keeper|op|akv|azurekeyvault|vault)://[^\s"']+`
+// vaultRefPattern matches the safe reference form used by supported vaults. The
+// scheme set is kept in sync with the resolver (internal/vault.anyRefRe): only
+// schemes that are actually resolvable suppress a plaintext-secret finding, so an
+// unresolvable `vault://…` / `azurekeyvault://…` blob cannot mask a real secret.
+const vaultRefPattern = `(?i)(?:keeper|op|akv)://[^\s"']+`
 
 // New returns an Engine with the default zero-false-positive ruleset. Every rule
 // matches either a reserved unique token prefix or a strict keyword+format

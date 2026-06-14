@@ -60,6 +60,36 @@
       "title": "Audit log file",
       "description": "Path to append value-free audit records (JSON lines).",
       "default": ""
+    },
+    "execution_mode": {
+      "type": "string",
+      "title": "Execution mode",
+      "description": "Where secret resolution happens: 'auto' (local vault if present, else the Cowork broker), 'local' (always resolve on this host, Claude Code), or 'broker' (Cowork: host resolves, VM consumes over the network).",
+      "default": "auto"
+    },
+    "cowork_spool": {
+      "type": "string",
+      "title": "Cowork spool path",
+      "description": "Host path of the shared Cowork 'outputs' mount. Required to enable the broker; the host writes the control-plane bootstrap here (never a secret value).",
+      "default": ""
+    },
+    "broker_host": {
+      "type": "string",
+      "title": "Broker bind IP",
+      "description": "The vmnet bridge IP the host broker binds and advertises (Plan A). Refuses to bind all interfaces (0.0.0.0).",
+      "default": "172.16.10.1"
+    },
+    "broker_port": {
+      "type": "string",
+      "title": "Broker port",
+      "description": "TCP port for the Cowork broker.",
+      "default": "8771"
+    },
+    "broker_ref_policy": {
+      "type": "string",
+      "title": "Broker reference policy",
+      "description": "'enforce' (default) resolves only references the host observed in tool inputs this session; 'audit' resolves any requested reference and logs it (less safe — opt-in).",
+      "default": "enforce"
     }
   }
 }

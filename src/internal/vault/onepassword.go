@@ -1,6 +1,9 @@
 package vault
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // onePassword resolves op:// references via the 1Password CLI (`op read`).
 // It mirrors the Keeper provider through the same Provider interface so both
@@ -31,11 +34,18 @@ func (o *onePassword) Resolve(ref, account string) (string, error) {
 	if account == "" {
 		account = o.account
 	}
+	// A reference's account is attacker-influenced (parsed from op://<account>:…);
+	// reject a flag-looking account so it can never be smuggled as an `op` option.
+	if strings.HasPrefix(account, "-") {
+		return "", fmt.Errorf("invalid 1Password account %q", account)
+	}
 	args := []string{"read"}
 	if account != "" {
 		args = append(args, "--account", account)
 	}
-	args = append(args, ref)
+	// `--` ends option parsing so the op:// reference is always positional, never
+	// interpreted as a flag.
+	args = append(args, "--", ref)
 	out, err := o.r.Run("op", args...)
 	if err != nil {
 		return "", err

@@ -86,6 +86,26 @@ run a query), let it inject. When the goal is to **write down the reference** (a
 script, a `.env`, a config the app reads later via `secrets-guard run`), keep it
 literal — write the reference, escaping with `\` if needed.
 
+## Claude Cowork (commands run in a VM)
+
+If you are in Cowork, your Bash commands run in an isolated VM that has no vault
+CLI. The host resolves references and delivers values to the VM over a secure
+broker, used **only in process memory**. Two rules in Cowork:
+
+1. **Consume secrets only via `secrets-guard run --env-file .env -- <cmd>`.** Write
+   the `.env` with the **Write tool** (it keeps the reference, e.g.
+   `DB=op://Private/db/password`), then run your command through `secrets-guard
+   run`. The value is injected into the child's environment and never becomes
+   visible to the shell or written to disk.
+2. **Inline references and `secrets-guard read` do not return a value in the VM**
+   (that would expose the value to the shell, which could write it to disk). So
+   `curl -H "Authorization: op://…"` won't work inline — instead put the token in a
+   `.env` and run `secrets-guard run --env-file .env -- sh -c 'curl -H
+   "Authorization: $TOKEN" …'`.
+
+If a reference fails with `ref-not-approved`, write it as a `KEY=op://…` line in a
+`.env` via the Write tool first (that authorizes it), then run. Never paste a value.
+
 ## Running code that needs the secrets (the key pattern)
 
 Because `.env` files hold *references*, a normal app (`python-dotenv`, `godotenv`,

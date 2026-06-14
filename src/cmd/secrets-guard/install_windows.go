@@ -26,7 +26,7 @@ func installBinName() string { return "secrets-guard.exe" }
 
 // winPathRe extracts the value of the user's Path from `reg query` output, e.g.
 //
-//	    Path    REG_EXPAND_SZ    C:\Users\me\AppData\Local\Microsoft\WindowsApps;...
+//	Path    REG_EXPAND_SZ    C:\Users\me\AppData\Local\Microsoft\WindowsApps;...
 //
 // The value may itself contain spaces (C:\Program Files\…), so we capture
 // everything after the REG_*SZ type token rather than splitting on whitespace.

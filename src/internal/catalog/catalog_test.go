@@ -52,7 +52,7 @@ func TestOnePassword_ListFields_PrefixesAccount_NoValues(t *testing.T) {
 	m := &mockRunner{
 		present: map[string]bool{"op": true},
 		outputs: map[string]string{
-			"op item get test-claude --format json --account 7FWKE": `{"fields":[
+			"op item get --format json --account 7FWKE -- test-claude": `{"fields":[
                 {"id":"username","type":"STRING","label":"username","value":"alice","reference":"op://Private/test-claude/username"},
                 {"id":"password","type":"CONCEALED","label":"password","value":"S3cr3tV4lue!","reference":"op://Private/test-claude/password"},
                 {"id":"sec","type":"STRING","label":"","value":"x","reference":""}]}`,

@@ -115,6 +115,11 @@ func (o *opCat) args(account string, a ...string) []string {
 	return a
 }
 
+// flagLike reports whether an untrusted catalog argument (account/vault/item)
+// could be parsed as an `op` flag. Such names are rejected so a VM-supplied value
+// can never be smuggled as an option (parity with the resolver's hardening).
+func flagLike(s string) bool { return strings.HasPrefix(s, "-") }
+
 func (o *opCat) ListAccounts() ([]Account, error) {
 	out, err := o.r.Run("op", "account", "list", "--format", "json")
 	if err != nil {
@@ -155,6 +160,9 @@ func (o *opCat) ListVaults(account string) ([]Vault, error) {
 }
 
 func (o *opCat) ListItems(account, vault string) ([]Item, error) {
+	if flagLike(account) || flagLike(vault) {
+		return nil, fmt.Errorf("invalid account/vault name")
+	}
 	cmd := []string{"item", "list", "--format", "json"}
 	if vault != "" {
 		cmd = append(cmd, "--vault", vault)
@@ -183,11 +191,17 @@ func (o *opCat) ListItems(account, vault string) ([]Item, error) {
 }
 
 func (o *opCat) ListFields(item, account, vault string) ([]Field, error) {
-	cmd := []string{"item", "get", item, "--format", "json"}
+	if flagLike(item) || flagLike(account) || flagLike(vault) {
+		return nil, fmt.Errorf("invalid item/account/vault name")
+	}
+	cmd := []string{"item", "get", "--format", "json"}
 	if vault != "" {
 		cmd = append(cmd, "--vault", vault)
 	}
-	out, err := o.r.Run("op", o.args(account, cmd...)...)
+	// Append --account (via args) and ONLY THEN the option terminator + positional
+	// item, so `--` is the last flag and the item can never be read as an option.
+	full := append(o.args(account, cmd...), "--", item)
+	out, err := o.r.Run("op", full...)
 	if err != nil {
 		return nil, err
 	}

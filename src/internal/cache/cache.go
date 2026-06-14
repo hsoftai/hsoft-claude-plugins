@@ -15,6 +15,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -26,18 +27,27 @@ import (
 	"github.com/hsoftai/hsoft-claude-plugins/internal/seen"
 )
 
-const minLen = 6
+// minLen mirrors seen.minLen: short secrets (e.g. PINs) are still tracked so they
+// can be redacted/blocked rather than leaking into the transcript.
+const minLen = 4
 
-// socketDir keeps unix socket paths short — macOS caps them near 104 bytes, and
-// os.TempDir() (/var/folders/…) is already long. /tmp is short and standard.
+// socketDir returns a PRIVATE per-user 0700 directory for the cache socket — not
+// bare /tmp. Bare /tmp (sticky 1777) plus a session-derivable socket name let any
+// local process pre-bind an impostor daemon that answers `scan` as "clean",
+// silently disabling the resolved-value leak backstop. A 0700 dir keyed by uid
+// keeps other users out while staying short enough for macOS's ~104-byte unix
+// socket path limit. The dir is best-effort created by the caller.
 func socketDir() string {
 	if d := os.Getenv("SG_CACHE_DIR"); d != "" {
 		return d
 	}
+	base := "/tmp"
 	if runtime.GOOS == "windows" {
-		return os.TempDir()
+		base = os.TempDir()
 	}
-	return "/tmp"
+	dir := filepath.Join(base, fmt.Sprintf("secrets-guard-sock-%d", os.Getuid()))
+	_ = os.MkdirAll(dir, 0o700)
+	return dir
 }
 
 func sockPath(session string) string {
@@ -191,6 +201,11 @@ func roundtrip(session string, rq request, spawnIfDown bool) (response, bool) {
 	}
 	return rp, true
 }
+
+// Detach configures cmd so a spawned child fully outlives the current process
+// (new session leader on Unix, new process group on Windows). Exported so other
+// daemons in this binary (e.g. the Cowork broker) can reuse the same mechanism.
+func Detach(cmd *exec.Cmd) { detach(cmd) }
 
 func spawnDaemon(session string) bool {
 	self, err := os.Executable()

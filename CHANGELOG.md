@@ -7,6 +7,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Claude Cowork support via a host↔VM secret broker.** In Cowork the agent's
+  commands run in an isolated Linux VM with no vault CLI, while the hooks run on
+  the host. secrets-guard now resolves references **on the host** and serves the
+  values to the VM over an authenticated, certificate-pinned TLS channel
+  (`internal/broker`), where they are used **only in memory** — never on the VM's
+  disk, shell history, or the agent transcript. The host `SessionStart` hook starts
+  a per-session broker and publishes a control-plane bootstrap (capability token +
+  address + cert fingerprint, **never a value**) to the shared `outputs` spool;
+  `secrets-guard run`/`read` inside the VM auto-detect broker mode and fetch values
+  over the socket. Transport auto-negotiates Plan A (host binds the vmnet bridge,
+  VM dials) with a Plan B fallback (VM listens, host dials in). Inline `op://`
+  references in Bash are rewritten to `$(secrets-guard read 'op://…')` so the value
+  is materialized only at exec time in the VM. New options: `execution_mode`
+  (`auto`/`local`/`broker`), `cowork_spool`, `broker_host`, `broker_port`,
+  `broker_ref_policy` (`enforce` default / `audit`). Plain Claude Code is
+  unchanged. Security model and pentest: `docs/security-broker.md`; setup and
+  manual test: `docs/cowork.md`.
+- **Three capture-the-flag rounds hardened the broker further.** (1) The allowlist
+  no longer over-populates from passive text in any tool input (confused deputy).
+  (2) In broker mode the value is never made shell-visible — references are kept
+  literal and `secrets-guard read` is refused inside the VM, so a heredoc/redirect
+  can't write the value to the VM disk; the only value channel is `secrets-guard
+  run --env-file` (injects into the child env). (3) Only real `KEY=op://…` lines in
+  an env file written through the Write/Edit tool authorize a reference — a bare
+  `echo` or prose no longer mints an allowlist entry. See `docs/security-broker.md`.
+- **Security hardening of the broker (pentest-driven).** Mandatory TLS pinning,
+  32-byte minimum capability token, default `enforce` reference allowlist (the host
+  authorizes only references it observed this session), per-start token rotation +
+  1h TTL with live refresh, request caps (max refs, bounded reads, per-message
+  deadlines), refusal to bind all interfaces, single-live-bootstrap discovery
+  (fail-closed on ambiguity), and spool cleanup on `SessionEnd`.
 - **Automatic, cross-platform CLI install on plugin enable (Linux/macOS/Windows).**
   A new `SessionStart` hook installs the `secrets-guard` CLI into the user's own
   terminal PATH the first time a session starts with the plugin enabled — so just

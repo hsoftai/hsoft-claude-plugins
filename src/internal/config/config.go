@@ -4,7 +4,10 @@
 // plugin's userConfig. Every option has a safe default.
 package config
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 // Config is the resolved runtime configuration.
 type Config struct {
@@ -17,7 +20,18 @@ type Config struct {
 	CustomPatternsPath  string
 	AllowlistPath       string
 	AuditLogPath        string
+
+	// Broker mode (Cowork): resolution happens on the host and resolved values
+	// are delivered to the VM over a network broker, used only in memory.
+	ExecutionMode   string // auto | local | broker
+	CoworkSpool     string // path to the shared `outputs` mount (host or VM side)
+	BrokerHost      string // IP the host broker binds/advertises on the vmnet bridge
+	BrokerPort      int    // TCP port for the broker (0 = default 8771)
+	BrokerRefPolicy string // enforce (default) | audit — allowlist refs the host observed
 }
+
+// DefaultBrokerPort is used when broker_port is unset.
+const DefaultBrokerPort = 8771
 
 // Getenv is the lookup function (os.Getenv in production, a map in tests).
 type Getenv func(string) string
@@ -32,6 +46,9 @@ func Load(env Getenv) Config {
 		ToolInputPolicy:     "deny",
 		ToolOutputMode:      "redact",
 		CommandReferences:   "inject",
+		ExecutionMode:       "auto",
+		BrokerPort:          DefaultBrokerPort,
+		BrokerRefPolicy:     "enforce",
 	}
 
 	c.VaultProvider = oneOf(env(prefix+"VAULT_PROVIDER"), c.VaultProvider, "auto", "keeper", "1password")
@@ -43,7 +60,20 @@ func Load(env Getenv) Config {
 	c.CustomPatternsPath = env(prefix + "CUSTOM_PATTERNS_PATH")
 	c.AllowlistPath = env(prefix + "ALLOWLIST_PATH")
 	c.AuditLogPath = env(prefix + "AUDIT_LOG_PATH")
+
+	c.ExecutionMode = oneOf(env(prefix+"EXECUTION_MODE"), c.ExecutionMode, "auto", "local", "broker")
+	c.CoworkSpool = env(prefix + "COWORK_SPOOL")
+	c.BrokerHost = env(prefix + "BROKER_HOST")
+	c.BrokerPort = intOr(env(prefix+"BROKER_PORT"), c.BrokerPort)
+	c.BrokerRefPolicy = oneOf(env(prefix+"BROKER_REF_POLICY"), c.BrokerRefPolicy, "audit", "enforce")
 	return c
+}
+
+func intOr(v string, def int) int {
+	if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 && n <= 65535 {
+		return n
+	}
+	return def
 }
 
 func boolOr(v string, def bool) bool {

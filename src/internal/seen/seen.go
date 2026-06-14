@@ -16,8 +16,10 @@ import (
 	"strings"
 )
 
-// minLen is the shortest value worth matching (avoids redacting trivial strings).
-const minLen = 6
+// minLen is the shortest resolved value worth matching. Kept low (4) so short
+// secrets (e.g. PINs) are still redacted/blocked rather than slipping into the
+// transcript; 1–3 byte values are skipped to avoid pathological over-redaction.
+const minLen = 4
 
 // Placeholder replaces a recognized resolved value in redacted output.
 const Placeholder = "[REDACTED BY SECRETS-GUARD]"
