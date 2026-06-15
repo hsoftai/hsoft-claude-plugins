@@ -26,16 +26,17 @@ import (
 // is applied over /proc/self/fd/<fd> — i.e. over the exact inode we opened and read,
 // never a path re-resolved at mount time. This closes the check-then-use race on the
 // read and the mount target.
-func renderFiles(files []refFile, values map[string]string) error {
+func renderFiles(files []refFile, values map[string]string) (func(), error) {
+	noop := func() {}
 	// Make this namespace's mount tree private so nothing propagates to the host.
 	_ = syscall.Mount("", "/", "", syscall.MS_REC|syscall.MS_PRIVATE, "")
 
 	dir, err := os.MkdirTemp("", "sg-render-")
 	if err != nil {
-		return err
+		return noop, err
 	}
 	if err := syscall.Mount("tmpfs", dir, "tmpfs", syscall.MS_NOSUID|syscall.MS_NODEV, "mode=0700"); err != nil {
-		return fmt.Errorf("tmpfs: %w", err)
+		return noop, fmt.Errorf("tmpfs: %w", err)
 	}
 	_ = syscall.Mount("", dir, "", syscall.MS_PRIVATE, "")
 
@@ -45,7 +46,9 @@ func renderFiles(files []refFile, values map[string]string) error {
 	for _, f := range files {
 		i += renderOne(f.path, dir, i, cwdReal, values, seen)
 	}
-	return nil
+	// The bind-mounts + tmpfs are private to this namespace and the kernel discards
+	// them when it exits — nothing to restore.
+	return noop, nil
 }
 
 // devIno identifies a file by device + inode so a file reachable via two paths is

@@ -1,7 +1,7 @@
 {
   "name": "secrets-guard",
   "displayName": "secrets-guard",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Keep secrets out of the model: block plaintext secrets in prompts, resolve vault references (Keeper/1Password) into tool input, and redact secrets leaked in tool output.",
   "author": {
     "name": "Humphrey Consulting Group"
@@ -97,7 +97,7 @@
     "sandbox": {
       "type": "string",
       "title": "Secret-rendering sandbox",
-      "description": "Render vault references into real values — in the environment AND in files under the working directory — inside an ephemeral per-command mount namespace, so apps that read secrets from config files (not just 'secrets-guard run --env-file') just work. 'auto' (default) enables it in Cowork and on a Linux Claude Code host; 'on' forces it; 'off' disables it (macOS/Windows always fall back to environment-only rendering).",
+      "description": "Render vault references into real values — in the environment, in files under the working directory, AND in the command body — scoped to one command, so apps that read secrets from config files just work. Runs on ALL platforms: Linux uses a private bind-mount (the value never touches the real disk); macOS/Windows render files in place and restore the original references right after the command (a crash-recovery journal makes that safe). 'auto' (default) enables it wherever a vault resolves; 'on' forces it; 'off' disables file rendering.",
       "default": "auto"
     },
     "sandbox_globs": {

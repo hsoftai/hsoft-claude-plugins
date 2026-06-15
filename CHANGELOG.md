@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-06-15
+
+### Changed
+- **The rendering sandbox now runs on macOS and Windows too, not just Linux.** Linux
+  keeps the private bind-mount (the value never touches the real disk). macOS/Windows
+  render the matched files **in place** with the real values, run the command, and
+  restore the original references immediately after — guarded by a crash-recovery
+  journal (it stores the originals, i.e. references, not values) that SessionStart
+  replays if a command was hard-killed mid-render, plus signal handlers for clean
+  interruption. The sandbox also redacts the command's stdout/stderr **inline** now
+  (a printed value is masked, not just blocked). `sandbox` defaults to `auto` (on
+  wherever a vault resolves), so the protection — env + file + command rendering and
+  output redaction — is uniform across Linux, macOS and Windows.
+
 ## [0.4.1] - 2026-06-15
 
 ### Fixed

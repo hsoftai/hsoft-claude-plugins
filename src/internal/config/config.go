@@ -97,26 +97,22 @@ func Load(env Getenv) Config {
 }
 
 // SandboxWrap reports whether the hook should wrap a Bash command with the
-// `secrets-guard sandbox` runner (transparent env+file rendering). goos is the OS
-// where THIS process (the hook) runs; hasVault indicates a local vault is present.
+// `secrets-guard sandbox` runner (transparent env + file + command rendering).
+// hasVault indicates a local vault is present.
 //
-// In Cowork the command runs in the Linux VM, so the sandbox always applies there
-// regardless of the host hook's OS. For plain Claude Code the command runs on this
-// host, so the file sandbox (mount namespaces) requires goos == "linux".
-func (c Config) SandboxWrap(goos string, hasVault bool) bool {
+// The sandbox runs on every platform: Linux uses a private bind-mount (the value
+// never touches the real disk), and macOS/Windows render files in place with a
+// guaranteed restore. In Cowork the command runs in the Linux VM, so it always
+// applies there. `auto` enables it wherever a vault can resolve; `on` forces it;
+// `off` disables it.
+func (c Config) SandboxWrap(hasVault bool) bool {
 	if c.Sandbox == "off" {
 		return false
 	}
-	if c.IsCowork {
+	if c.IsCowork || c.Sandbox == "on" {
 		return true
 	}
-	if goos != "linux" {
-		return false // macOS/Windows host: keep the inline/env behavior
-	}
-	if c.Sandbox == "on" {
-		return true
-	}
-	return hasVault // auto: on for a Linux host that can resolve locally
+	return hasVault // auto
 }
 
 func boolOr(v string, def bool) bool {

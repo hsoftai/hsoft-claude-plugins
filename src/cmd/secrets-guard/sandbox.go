@@ -20,20 +20,26 @@ package main
 // the command environment / on fd 3).
 
 import (
+	"bufio"
 	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 
 	"github.com/hsoftai/hsoft-claude-plugins/internal/cache"
 	"github.com/hsoftai/hsoft-claude-plugins/internal/config"
 	"github.com/hsoftai/hsoft-claude-plugins/internal/cowork"
+	"github.com/hsoftai/hsoft-claude-plugins/internal/detect"
+	"github.com/hsoftai/hsoft-claude-plugins/internal/redact"
 	"github.com/hsoftai/hsoft-claude-plugins/internal/seen"
 )
 
@@ -111,7 +117,7 @@ func runSandbox() {
 		}
 	}
 	var fileRefs []refFile
-	canFiles := runtime.GOOS == "linux" && cfg.Sandbox != "off"
+	canFiles := cfg.Sandbox != "off"
 	if canFiles {
 		fileRefs, _ = scanRefFiles(cwd(), parseGlobs(cfg.SandboxGlobs))
 	}
@@ -122,15 +128,18 @@ func runSandbox() {
 		return
 	}
 
-	// Use a mount namespace only when we actually have files to bind-mount (or the
-	// operator asked for process isolation). Env-only rendering needs no namespace.
-	if canFiles && (len(fileRefs) > 0 || cfg.CoworkIsolate) && unshareSupported() {
+	// LINUX: render files via a private bind-mount inside a mount namespace, so the
+	// value never touches the real disk. Only this path uses unshare.
+	if runtime.GOOS == "linux" && canFiles && (len(fileRefs) > 0 || cfg.CoworkIsolate) && unshareSupported() {
 		reexecSandboxNS(cfg, cmd)
 		return
 	}
 
-	// Env-only rendering (no file sandbox here).
-	renderAndExec(cfg, cmd, false)
+	// Everywhere else (macOS/Windows, or Linux without namespaces): render env +
+	// command always, and files IN PLACE with restore (no namespace). On Linux
+	// without unshare we skip file rendering to avoid mutating real files unguarded.
+	withFiles := canFiles && len(fileRefs) > 0 && runtime.GOOS != "linux"
+	renderAndExec(cfg, cmd, withFiles)
 }
 
 // renderAndExec resolves every reference found in the environment (and, when
@@ -150,8 +159,13 @@ func renderAndExec(cfg config.Config, cmd []string, withFiles bool) {
 	for _, v := range env {
 		add(unescapedRefs(v))
 	}
-	for _, a := range cmd {
-		add(unescapedRefs(a))
+	// Command-body references are rendered unless command_references=keep (then they
+	// are left literal, like the inline path).
+	renderCmd := cfg.CommandReferences != "keep"
+	if renderCmd {
+		for _, a := range cmd {
+			add(unescapedRefs(a))
+		}
 	}
 	var files []refFile
 	if withFiles {
@@ -186,33 +200,48 @@ func renderAndExec(cfg config.Config, cmd []string, withFiles bool) {
 	for k := range env {
 		env[k] = renderRefs(env[k], values)
 	}
-	for i := range cmd {
-		cmd[i] = renderRefs(cmd[i], values)
+	if renderCmd {
+		for i := range cmd {
+			cmd[i] = renderRefs(cmd[i], values)
+		}
 	}
 
-	// 2) Render FILES (Linux bind-mount). On any failure, leave files literal — env
-	// and command are still rendered. Never write rendered content to the real disk.
+	// 2) Render FILES. Linux uses a private bind-mount (value never on real disk);
+	// macOS/Windows render in place and return a restore() that reverts the originals
+	// after the command (a crash-recovery journal makes that safe). On failure, leave
+	// files literal — env and command are still rendered.
+	restore := func() {}
 	if withFiles && len(files) > 0 {
-		if err := renderFiles(files, values); err != nil {
+		if r, err := renderFiles(files, values); err != nil {
 			fmt.Fprintln(os.Stderr, "secrets-guard sandbox: file rendering unavailable:", err)
+		} else if r != nil {
+			restore = r
 		}
 	}
 
-	// Register resolved values so a rendered value printed to stdout is caught by the
-	// host PostToolUse leak-block. In Cowork the host daemon already records them;
-	// this covers local mode.
+	// Register resolved values so a rendered value printed in the output is caught by
+	// the host PostToolUse leak-block (backstop). In Cowork the host daemon records
+	// them too; this covers local mode.
 	if session := os.Getenv("SG_SESSION"); session != "" {
-		vals := make([]string, 0, len(values))
-		for _, v := range values {
-			vals = append(vals, v)
-		}
-		cache.New().Add(session, vals)
+		cache.New().Add(session, valueList(values))
 		seen.RecordPaths(session, refs)
 	}
 
 	childEnv := mapToEnv(stripSandboxEnv(env))
 	childEnv = append(childEnv, envSandboxActive+"=1")
-	execCommandEnv(childEnv, cmd)
+	// Run the command, redact its output inline (so a printed value is masked, not
+	// just blocked), and restore in-place-rendered files afterward — even on a
+	// terminating signal.
+	execChildWithRestore(childEnv, cmd, values, restore)
+}
+
+// valueList returns the resolved secret values as a slice (for redaction/registration).
+func valueList(values map[string]string) []string {
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		out = append(out, v)
+	}
+	return out
 }
 
 // sandboxResolve resolves references either over the Cowork sealed-box channel (when
@@ -387,8 +416,7 @@ func cwd() string {
 }
 
 // execCommandEnv runs cmd with the given environment, propagating its exit code, and
-// exits. The mount namespace (if any) lives for the child's lifetime and is torn
-// down by the kernel when it exits.
+// exits. Used for the fast path (no secrets) — no redaction, no restore.
 func execCommandEnv(env, cmd []string) {
 	c := exec.Command(cmd[0], cmd[1:]...)
 	c.Env = env
@@ -401,4 +429,90 @@ func execCommandEnv(env, cmd []string) {
 		os.Exit(1)
 	}
 	os.Exit(0)
+}
+
+// execChildWithRestore runs the rendered command with its output redacted inline,
+// then restores any in-place-rendered files — exactly once, even if the process is
+// interrupted by a terminating signal mid-command. (On Linux, restore is a no-op:
+// the namespace's bind-mounts vanish on exit.)
+func execChildWithRestore(env, cmd []string, values map[string]string, restore func()) {
+	var once sync.Once
+	doRestore := func() {
+		if restore != nil {
+			once.Do(restore)
+		}
+	}
+	if restore != nil {
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+		go func() {
+			<-ch
+			doRestore()
+			os.Exit(130)
+		}()
+	}
+	code := runChildRedacted(env, cmd, values)
+	doRestore()
+	os.Exit(code)
+}
+
+// runChildRedacted runs the command and streams its stdout/stderr through redaction:
+// every resolved value (in any guarded encoding) and any high-confidence detected
+// secret is masked before it reaches the caller. Returns the child's exit code.
+func runChildRedacted(env, cmd []string, values map[string]string) int {
+	vlist := valueList(values)
+	eng := detect.New()
+	red := redact.New(eng)
+	redactLine := func(s string) string {
+		if len(vlist) > 0 {
+			s, _ = seen.Redact(s, vlist)
+		}
+		out, _ := red.Redact(s)
+		return out
+	}
+
+	c := exec.Command(cmd[0], cmd[1:]...)
+	c.Env = env
+	c.Stdin = os.Stdin
+	outR, oerr := c.StdoutPipe()
+	errR, eerr := c.StderrPipe()
+	if oerr != nil || eerr != nil {
+		c.Stdout, c.Stderr = os.Stdout, os.Stderr
+		return runAndCode(c)
+	}
+	if err := c.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, "secrets-guard sandbox:", err)
+		return 1
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	pump := func(r io.Reader, w io.Writer) {
+		defer wg.Done()
+		br := bufio.NewReader(r)
+		for {
+			line, err := br.ReadString('\n')
+			if len(line) > 0 {
+				fmt.Fprint(w, redactLine(line))
+			}
+			if err != nil {
+				return
+			}
+		}
+	}
+	go pump(outR, os.Stdout)
+	go pump(errR, os.Stderr)
+	wg.Wait()
+	return runAndCode2(c.Wait())
+}
+
+func runAndCode(c *exec.Cmd) int { return runAndCode2(c.Run()) }
+
+func runAndCode2(err error) int {
+	if err == nil {
+		return 0
+	}
+	if ee, ok := err.(*exec.ExitError); ok {
+		return ee.ExitCode()
+	}
+	return 1
 }

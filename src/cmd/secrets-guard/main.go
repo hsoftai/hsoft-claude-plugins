@@ -18,7 +18,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/hsoftai/hsoft-claude-plugins/internal/audit"
@@ -125,6 +124,9 @@ func runHook() {
 		if _, err := selfInstall("", true); err != nil {
 			fmt.Fprintln(os.Stderr, "secrets-guard: self-install:", err)
 		}
+		// Crash recovery: if a previous sandbox command was hard-killed mid-render on
+		// macOS/Windows (in-place file rendering), restore the original references now.
+		recoverSandboxJournals()
 		// Cowork: bring up the host-side secret daemon (cw-host) so the VM can
 		// resolve references over the sealed-box disk channel (the VM has no vault
 		// CLI). No-op in plain Claude Code.
@@ -622,9 +624,9 @@ func toHookConfig(c config.Config, vaultName string) hook.Config {
 		// Cowork uses the sealed-box disk channel (anchor + one-time token).
 		CoworkMode:    c.IsCowork,
 		CoworkIsolate: c.CoworkIsolate,
-		// Wrap Bash commands in `secrets-guard sandbox` (env + file rendering) on
-		// Cowork and on a Linux Claude Code host; macOS/Windows keep the inline path.
-		SandboxMode: c.SandboxWrap(runtime.GOOS, vaultName != "none"),
+		// Wrap Bash commands in `secrets-guard sandbox` (env + file + command
+		// rendering with output redaction) on all platforms where a vault resolves.
+		SandboxMode: c.SandboxWrap(vaultName != "none"),
 		ShellTools:  splitList(c.ShellTools),
 	}
 }
