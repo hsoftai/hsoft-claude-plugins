@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-06-15
+
+### Fixed
+- **Cowork rewrite now allows benign redirections.** The `secrets-guard run` →
+  `cw-run` rewrite previously bailed on any `>`/`<`/`&`, so a harmless trailing
+  `2>&1` silently fell back to the (correctly refused) local path. It now rewrites
+  single simple commands that carry only redirections (`2>&1`, `>`, `<`) — which
+  commute with the token's fd-3 here-string — while still rejecting chaining
+  (`;`, `&&`, `||`, newline), pipes (`|`), command substitution (`$(`, backtick),
+  and backgrounding (`&`).
+
 ## [0.3.1] - 2026-06-15
 
 ### Removed

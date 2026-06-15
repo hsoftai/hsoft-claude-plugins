@@ -517,10 +517,15 @@ func (h *Handler) coworkRewriteRun(cmd, session string) (string, bool) {
 	if t != "secrets-guard run" && !strings.HasPrefix(t, "secrets-guard run ") {
 		return "", false
 	}
-	// Single simple invocation only: no chaining / redirection / command
-	// substitution that could let an appended fd redirect attach to another
-	// statement or otherwise surface the token.
-	if strings.ContainsAny(t, ";\n|&`<>") || strings.Contains(t, "$(") {
+	// Single simple command only: reject anything that would create a SECOND
+	// command or run code, so the appended fd-3 here-string (the token) stays bound
+	// to this one cw-run invocation — chaining (`;`, newline, `&&`, `||`), pipes
+	// (`|`), command substitution (`$(`, backtick), and backgrounding (`&`). Plain
+	// redirections on the SAME simple command (`2>&1`, `>`, `<`) are SAFE: they
+	// commute with the token redirect, so they are allowed (a trailing `2>&1` must
+	// not defeat the secure path).
+	if strings.ContainsAny(t, ";\n|`") || strings.Contains(t, "$(") ||
+		strings.Contains(t, "&&") || strings.Contains(t, "||") || hasBackgroundAmp(t) {
 		return "", false
 	}
 	allowed := seen.LoadPaths(session)
@@ -555,6 +560,18 @@ func (h *Handler) coworkRewriteRun(cmd, session string) (string, bool) {
 	b.WriteString(" 3<<<")
 	b.WriteString(shellSingleQuote(tokenB64))
 	return b.String(), true
+}
+
+// hasBackgroundAmp reports whether s contains an `&` used for backgrounding (or
+// any chaining the caller has not already rejected) rather than as part of a
+// redirection fd-duplication (`2>&1`, `>&2`, `&>file`). It strips the redirection
+// forms first; any remaining `&` is a command-control operator and is rejected.
+func hasBackgroundAmp(s string) bool {
+	stripped := s
+	for _, p := range []string{">&", "<&", "&>"} {
+		stripped = strings.ReplaceAll(stripped, p, "")
+	}
+	return strings.Contains(stripped, "&")
 }
 
 func wrapBashCommand(toolInput json.RawMessage, selfPath, session string) (json.RawMessage, bool) {

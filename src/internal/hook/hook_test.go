@@ -572,22 +572,58 @@ func TestPreToolUse_CoworkKeepsRefLiteral(t *testing.T) {
 	}
 }
 
-// A compound command (redirection/chaining) is NOT rewritten — the fd redirect must
-// not attach to another statement; refs stay literal.
+// A compound command (chaining / pipe / substitution / background) is NOT rewritten
+// — the fd redirect must not attach to another statement; refs stay literal.
 func TestPreToolUse_CoworkDoesNotRewriteCompound(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.CoworkMode = true
+	h := newHandler(cfg)
+	h.SetCoworkAnchor(fakeAnchor{})
+	for _, cmd := range []string{
+		"secrets-guard run --env-file .env -- npm start && echo done",
+		"secrets-guard run --env-file .env -- npm start | tee out",
+		"secrets-guard run --env-file .env -- npm start &",
+		"secrets-guard run --env-file .env -- sh -c \"$(echo npm start)\"",
+		"secrets-guard run --env-file .env -- npm start ; rm -rf x",
+	} {
+		out := h.Handle(Input{
+			HookEventName: "PreToolUse", ToolName: "Bash", SessionID: "s1",
+			ToolInput: json.RawMessage(`{"command":` + jsonStr(cmd) + `}`),
+		})
+		if out.HookSpecificOutput != nil && out.HookSpecificOutput.UpdatedInput != nil {
+			var m map[string]any
+			_ = json.Unmarshal(out.HookSpecificOutput.UpdatedInput, &m)
+			if got, _ := m["command"].(string); strings.Contains(got, "cw-run") {
+				t.Fatalf("compound command must not be rewritten: %s", got)
+			}
+		}
+	}
+}
+
+// A trailing benign redirection (2>&1, >, <) must NOT defeat the secure rewrite: it
+// commutes with the token's fd-3 redirect on the same simple command.
+func TestPreToolUse_CoworkRewritesWithRedirection(t *testing.T) {
 	cfg := defaultCfg()
 	cfg.CoworkMode = true
 	h := newHandler(cfg)
 	h.SetCoworkAnchor(fakeAnchor{})
 	out := h.Handle(Input{
 		HookEventName: "PreToolUse", ToolName: "Bash", SessionID: "s1",
-		ToolInput: json.RawMessage(`{"command":"secrets-guard run --env-file .env -- npm start > out.txt"}`),
+		ToolInput: json.RawMessage(`{"command":"secrets-guard run --env-file .env -- sh -c 'echo \"len=${#PASSWORD}\"' 2>&1"}`),
 	})
-	if out.HookSpecificOutput != nil && out.HookSpecificOutput.UpdatedInput != nil {
-		var m map[string]any
-		_ = json.Unmarshal(out.HookSpecificOutput.UpdatedInput, &m)
-		if cmd, _ := m["command"].(string); strings.Contains(cmd, "cw-run") {
-			t.Fatalf("compound command must not be rewritten: %s", cmd)
-		}
+	if out.HookSpecificOutput == nil || out.HookSpecificOutput.UpdatedInput == nil {
+		t.Fatalf("a trailing 2>&1 must still be rewritten, got %+v", out)
 	}
+	var m map[string]any
+	_ = json.Unmarshal(out.HookSpecificOutput.UpdatedInput, &m)
+	cmd, _ := m["command"].(string)
+	if !strings.Contains(cmd, "secrets-guard cw-run") || !strings.Contains(cmd, "2>&1") || !strings.Contains(cmd, "3<<<'dG9rZW4='") {
+		t.Fatalf("rewrite must keep 2>&1 and append the token redirect: %s", cmd)
+	}
+}
+
+// jsonStr quotes s as a JSON string literal for embedding in a raw message.
+func jsonStr(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }
