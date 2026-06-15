@@ -16,3 +16,6 @@ coverage.*
 
 # NOTE: plugins/secrets-guard/bin/* (prebuilt binaries) ARE committed on purpose,
 # so the plugin works when installed from the git marketplace without a Go build.
+
+# diagnostic env dumps (SG_DEBUG_ENV) — never commit
+secrets-guard-envprobe-*.json

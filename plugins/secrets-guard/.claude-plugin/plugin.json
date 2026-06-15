@@ -1,11 +1,20 @@
 {
   "name": "secrets-guard",
   "displayName": "secrets-guard",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Keep secrets out of the model: block plaintext secrets in prompts, resolve vault references (Keeper/1Password) into tool input, and redact secrets leaked in tool output.",
-  "author": { "name": "Humphrey Consulting Group" },
+  "author": {
+    "name": "Humphrey Consulting Group"
+  },
   "license": "MIT",
-  "keywords": ["security", "dlp", "secrets", "redaction", "keeper", "1password"],
+  "keywords": [
+    "security",
+    "dlp",
+    "secrets",
+    "redaction",
+    "keeper",
+    "1password"
+  ],
   "userConfig": {
     "vault_provider": {
       "type": "string",

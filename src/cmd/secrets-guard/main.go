@@ -104,6 +104,10 @@ func runHook() {
 		return
 	}
 
+	// Diagnostic (SG_DEBUG_ENV): snapshot what this hook receives, to determine
+	// from a real Cowork session where the COMMAND will run (VM) vs the hook (host).
+	dumpEnvProbe(in)
+
 	// SessionStart: make the CLI available in the developer's OWN terminal
 	// (Linux/macOS/Windows) automatically, so just installing/enabling the plugin
 	// — including when enforced via managed-settings.json — is enough to get the

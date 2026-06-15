@@ -26,13 +26,14 @@ import (
 
 // Input is the JSON payload Claude Code delivers on stdin.
 type Input struct {
-	HookEventName string          `json:"hook_event_name"`
-	SessionID     string          `json:"session_id"`
-	Cwd           string          `json:"cwd"`
-	Prompt        string          `json:"prompt"`
-	ToolName      string          `json:"tool_name"`
-	ToolInput     json.RawMessage `json:"tool_input"`
-	ToolResponse  json.RawMessage `json:"tool_response"`
+	HookEventName  string          `json:"hook_event_name"`
+	SessionID      string          `json:"session_id"`
+	Cwd            string          `json:"cwd"`
+	TranscriptPath string          `json:"transcript_path"`
+	Prompt         string          `json:"prompt"`
+	ToolName       string          `json:"tool_name"`
+	ToolInput      json.RawMessage `json:"tool_input"`
+	ToolResponse   json.RawMessage `json:"tool_response"`
 }
 
 // HookSpecificOutput carries the per-event decision fields.
