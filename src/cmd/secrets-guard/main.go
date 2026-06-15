@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/hsoftai/hsoft-claude-plugins/internal/audit"
@@ -58,6 +59,9 @@ func main() {
 			return
 		case "cw-run":
 			runCwRun()
+			return
+		case "sandbox":
+			runSandbox()
 			return
 		case "run":
 			runRun()
@@ -615,9 +619,11 @@ func toHookConfig(c config.Config, vaultName string) hook.Config {
 		ToolOutputMode:      c.ToolOutputMode,
 		CommandReferences:   c.CommandReferences,
 		VaultName:           vaultName,
-		// Cowork uses the sealed-box disk channel: keep references literal and rewrite
-		// the canonical `secrets-guard run` into `cw-run`.
+		// Cowork uses the sealed-box disk channel (anchor + one-time token).
 		CoworkMode:    c.IsCowork,
 		CoworkIsolate: c.CoworkIsolate,
+		// Wrap Bash commands in `secrets-guard sandbox` (env + file rendering) on
+		// Cowork and on a Linux Claude Code host; macOS/Windows keep the inline path.
+		SandboxMode: c.SandboxWrap(runtime.GOOS, vaultName != "none"),
 	}
 }

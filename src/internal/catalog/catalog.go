@@ -275,6 +275,13 @@ func (k *keeperCat) ListItems(_, _ string) ([]Item, error) {
 }
 
 func (k *keeperCat) ListFields(item, _, _ string) ([]Field, error) {
+	// The item UID is attacker-influenced (the model passes it through the
+	// list_fields MCP tool). Reject a flag-looking value so it can never be
+	// smuggled as a `ksm` option via argument injection — parity with the
+	// 1Password path's flagLike guard and the resolver's hardening.
+	if flagLike(item) {
+		return nil, fmt.Errorf("invalid item id")
+	}
 	out, err := k.r.Run("ksm", "secret", "get", "--uid", item, "--json")
 	if err != nil {
 		return nil, err

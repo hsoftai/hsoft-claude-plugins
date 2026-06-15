@@ -75,39 +75,53 @@ All optional — Cowork works with defaults:
 |---|---|---|
 | `execution_mode` | `auto` | `auto`/`local`/`cowork` |
 | `cowork_spool` | (auto) | Host spool path; auto-derived from `CLAUDE_PROJECT_DIR` |
-| `cowork_isolate` | `false` | Wrap the VM child in a user/pid/mount namespace |
-| `cowork_ref_policy` | `enforce` | `enforce` resolves only host-approved refs; `audit` logs any |
+| `cowork_isolate` | `false` | Also add a pid/mount-proc namespace to the sandbox |
+| `cowork_ref_policy` | `audit` | `audit` resolves any token-authorized ref + logs; `enforce` only host-observed refs |
+| `sandbox` | `auto` | `auto`/`on`/`off` — the transparent env+file rendering sandbox |
+| `sandbox_globs` | (defaults) | comma-separated globs the sandbox scans for references |
 
-## Usage in the VM
+## The rendering sandbox (default)
 
-Put **references** in a dotenv and use the canonical pattern (the host rewrites it
-to the secure `cw-run` form automatically):
+The host hook wraps **every** Bash command as `secrets-guard sandbox -- sh -c '<your
+command>'`. The sandbox runs in the VM: it finds vault references in the
+**environment** and in **matched files** under the working directory (`.env`,
+`config.yaml`, `settings.json`, `package.json`, …), fetches the values over the
+sealed-box channel, enters a private mount namespace, and renders them — env vars
+become their values, and each ref-file is **bind-mounted with a rendered copy** so
+the app reads the real secret. The real files keep only references; the rendered
+copies live in an in-memory tmpfs that the kernel discards when the command exits.
+
+So secrets "just work" for any loader — dotenv libraries, `source .env`, config
+files read directly, framework config — not only `secrets-guard run --env-file`.
+Any command works (pipes, `&&`, redirections, multi-line); the original is passed
+as a single quoted `sh -c` argument, and the value never appears in the command
+text, argv, env of other processes, or the transcript.
 
 ```sh
-# .env  (written with the Write tool so the reference is authorized)
-DB_PASSWORD=op://Private/db/password
-
-secrets-guard run --env-file .env -- ./my-app
+# config.yaml / .env hold REFERENCES (write them with the Write tool):
+#   DB_PASSWORD=op://Private/db/password
+node app.js          # app.js reads .env → sees the real password (rendered in a private ns)
+cat config.yaml      # shows the value (rendered) → the host PostToolUse blocks that output
 ```
 
-The value reaches `./my-app` via its environment, in memory only. Inline `op://…`
-in a bare Bash command is kept **literal**, and `secrets-guard read` is **refused**
-in the VM (both would expose the value to a shell that could redirect it to disk).
+`secrets-guard run --env-file .env -- ./app` still works too (it runs inside the
+sandbox, which renders the `.env` first). `secrets-guard read` remains refused in
+the VM (it would print a value to a shell that could redirect it to disk).
 
 ## Manual test in a real Cowork session
 
 Run **inside the Cowork VM**. It leaves no secret on disk.
 
 ```sh
-# 1) Canonical pattern: .env holds the REFERENCE; the child gets the VALUE in env.
+# 1) File rendering: write config with a REFERENCE, read it back through an app.
 printf 'PASSWORD=op://Private/test-claude/password\n' > .env   # use the Write tool
-secrets-guard run --env-file .env -- sh -c 'echo "len=${#PASSWORD}"'
-#    Expect: len=<real length>, exit 0.
+node -e 'console.log("len="+require("fs").readFileSync(".env","utf8").split("=")[1].trim().length)'
+#    Expect: len=<real password length> (the file read as rendered) — value never printed.
 
-# 2) Anti-leak: the value must NOT be anywhere on the VM disk.
-grep -rIn "secret-value-if-known" /tmp "$HOME" 2>/dev/null && echo 'LEAK!' || echo 'OK'
-
-# 3) enforce: a reference the host never observed is denied (host returns ref-not-approved).
+# 2) Anti-leak: after the command, the real file holds only the reference and no
+#    value is anywhere on the VM disk.
+cat .env                                            # → PASSWORD=op://Private/test-claude/password
+grep -rIn "the-known-value" /tmp "$HOME" 2>/dev/null && echo 'LEAK!' || echo 'OK'
 ```
 
 On the **host**, confirm the daemon and value-free audit:

@@ -90,6 +90,11 @@ type Config struct {
 	CoworkMode bool
 	// CoworkIsolate wraps the VM child in a user/pid/mount namespace (unshare).
 	CoworkIsolate bool
+	// SandboxMode wraps every Bash command in `secrets-guard sandbox`, which renders
+	// references (env + files under cwd) into real values inside an ephemeral
+	// per-command mount namespace. On a Cowork host this also carries the anchor +
+	// one-time token (CoworkMode). True on Cowork and on a Linux Claude Code host.
+	SandboxMode bool
 }
 
 // CoworkAnchor mints, per command, the trust anchor for a fetch that will run in
@@ -116,7 +121,7 @@ type Handler struct {
 	red      *redact.Redactor
 	vault    Resolver
 	cache    SecretCache
-	selfPath string // absolute path to this binary, used for Bash output wrapping
+	selfPath string       // absolute path to this binary, used for Bash output wrapping
 	anchor   CoworkAnchor // mints the per-command Cowork trust anchor (nil outside Cowork)
 
 	// Last holds the audit record of the most recent Handle call.
@@ -138,10 +143,24 @@ func NewHandler(cfg Config, eng *detect.Engine, red *redact.Redactor, vault Reso
 // knownInText reports whether text contains a secret value resolved earlier this
 // session. It uses the in-memory cache when available, and falls back to
 // re-resolving the recorded references (ephemeral) when the cache is down.
+//
+// SECURITY (amnesiac-cache fail-open): the cache daemon holds values in RAM only
+// and forgets them on restart (idle timeout, crash, or a fresh daemon replacing an
+// exited one that held earlier values). A live-but-amnesiac daemon answers a `scan`
+// with found=false, ok=true for a value that IS still in the durable on-disk `seen`
+// ledger — so trusting a cache "not found" would silently let a previously-resolved
+// value round-trip to the model, defeating the core invariant. The asymmetry is the
+// fix: a cache HIT is always authoritative (a positive can never be an amnesiac false
+// negative), but a cache MISS must be corroborated against the durable ledger before
+// we conclude "clean". The ledger fallback re-resolves references in ephemeral memory
+// (no disk values) and is only paid when the cache missed — the common case (truly
+// clean text) is a single inexpensive re-resolve, and a real hit short-circuits it.
 func (h *Handler) knownInText(session, text string) bool {
-	if found, _, ok := h.cache.Scan(session, text); ok {
-		return found
+	if found, _, ok := h.cache.Scan(session, text); ok && found {
+		return true // cache hit is authoritative; never an amnesiac false negative
 	}
+	// Cache unavailable OR cache reported "not found": corroborate against the
+	// durable reference ledger so an amnesiac (restarted) daemon cannot fail open.
 	return seen.Contains(text, h.sessionValues(session))
 }
 
@@ -274,16 +293,19 @@ func (h *Handler) handlePreTool(in Input) Output {
 		var m map[string]any
 		if json.Unmarshal(in.ToolInput, &m) == nil {
 			if cmd, ok := m["command"].(string); ok && cmd != "" {
-				// Cowork: rewrite the canonical `secrets-guard run --env-file …`
-				// invocation into `cw-run` carrying the per-command trust anchor
-				// (host public key) and a one-time token (delivered via fd). The
-				// secret is fetched into the child's memory in the VM — never the
-				// shell, disk, argv or env.
-				if h.cfg.CoworkMode {
-					if rewritten, ok := h.coworkRewriteRun(cmd, in.SessionID); ok {
+				// Sandbox: wrap the WHOLE command in `secrets-guard sandbox`, which
+				// renders vault references — in the environment AND in files under the
+				// working directory — into real values inside an ephemeral per-command
+				// mount namespace, then runs the command. The value never appears in the
+				// command text, the shell, argv, or the transcript. Any command works
+				// (pipes, &&, redirections, multi-line) because the original is passed
+				// as a single quoted `sh -c` argument. On Cowork it also carries the
+				// per-command trust anchor + one-time token.
+				if h.cfg.SandboxMode {
+					if rewritten, ok := h.sandboxWrapCommand(cmd, in.SessionID); ok {
 						m["command"] = rewritten
 						if b, e := json.Marshal(m); e == nil {
-							h.Last = Decision{Event: "PreToolUse", Action: "cowork-run"}
+							h.Last = Decision{Event: "PreToolUse", Action: "sandbox"}
 							return Output{HookSpecificOutput: &HookSpecificOutput{
 								HookEventName: "PreToolUse", UpdatedInput: b,
 							}}
@@ -342,7 +364,7 @@ func (h *Handler) handlePreTool(in Input) Output {
 	// 3) For Bash in redact mode, wrap the command so its output is redacted at
 	// the source (PostToolUse output rewriting is not honored by Claude Code).
 	wrapped := false
-	if in.ToolName == "Bash" && h.cfg.ToolOutputMode == "redact" && h.selfPath != "" && !h.cfg.CoworkMode {
+	if in.ToolName == "Bash" && h.cfg.ToolOutputMode == "redact" && h.selfPath != "" && !h.cfg.CoworkMode && !h.cfg.SandboxMode {
 		base := updated
 		if base == nil {
 			base = in.ToolInput
@@ -377,7 +399,7 @@ func (h *Handler) handlePreTool(in Input) Output {
 }
 
 func (h *Handler) handlePostTool(in Input) Output {
-	if h.cfg.ToolOutputMode == "off" || len(in.ToolResponse) == 0 {
+	if len(in.ToolResponse) == 0 {
 		h.Last = Decision{Event: "PostToolUse", Action: "allow"}
 		return Output{}
 	}
@@ -389,6 +411,14 @@ func (h *Handler) handlePostTool(in Input) Output {
 	// check here (including for wrapped Bash) as a server-side backstop: if the
 	// wrap worked the output is already redacted and this finds nothing; if the
 	// wrap was bypassed, the leak is blocked here.
+	//
+	// This backstop runs even when ToolOutputMode is "off". `off` disables the
+	// HEURISTIC detector scan below (which can have false positives and is a
+	// best-effort plus), but it must NOT disable the core invariant that a value
+	// secrets-guard itself resolved this session never round-trips to the model.
+	// In sandbox mode the inline redact-stream wrap is disabled, so this is the
+	// ONLY thing standing between a rendered vault secret printed by a Bash command
+	// and the transcript — gating it on ToolOutputMode would silently leak it.
 	if h.knownInText(in.SessionID, text) {
 		h.Last = Decision{Event: "PostToolUse", Action: "block", Count: 1}
 		return Output{
@@ -397,6 +427,13 @@ func (h *Handler) handlePostTool(in Input) Output {
 			SystemMessage: "🛑 secrets-guard retuvo la salida: contiene un secreto ya resuelto en esta sesión " +
 				"(posible fuga al leerlo de vuelta). El valor no se entregó al modelo; usa la referencia de bóveda.",
 		}
+	}
+
+	// Detector-based scanning/blocking of arbitrary (not session-resolved) secrets
+	// is the tunable part: `off` disables it.
+	if h.cfg.ToolOutputMode == "off" {
+		h.Last = Decision{Event: "PostToolUse", Action: "allow"}
+		return Output{}
 	}
 
 	findings := h.eng.Scan(text)
@@ -501,31 +538,33 @@ func (h *Handler) processBashCommand(cmd string) (newCmd string, refs []string, 
 	return out, refs, vals, injectErr
 }
 
-// coworkRewriteRun rewrites a single, simple `secrets-guard run --env-file … -- CMD`
-// invocation (the canonical Cowork value-delivery pattern) into a `cw-run` command
-// that carries the per-command trust anchor (host public key) on its argv and a
-// one-time token on fd 3. It fires ONLY for a lone simple invocation: if the command
-// chains other statements or uses shell operators / redirections / substitutions,
-// it is left untouched (references stay literal — the value is simply not delivered
-// inline; the agent should use the canonical pattern in Cowork). Returns ok=false
-// to fall back to the literal-reference behavior.
-func (h *Handler) coworkRewriteRun(cmd, session string) (string, bool) {
+// sandboxWrapCommand wraps an entire Bash command in `secrets-guard sandbox`, which
+// renders vault references — in the environment AND in matched files under the
+// working directory — into real values inside an ephemeral per-command mount
+// namespace, then runs the original command. The original command is passed as a
+// single quoted `sh -c '<cmd>'` argument, so ANY command works (pipes, &&,
+// redirections, multi-line) and the secret never appears in the command text.
+//
+// On a Cowork host the wrapper also carries the per-command trust anchor (host
+// public key + exec id, via the environment — authoritative over agent argv) and a
+// one-time token on fd 3. On a local Linux host no anchor/token is needed (the
+// sandbox resolves with the local vault).
+func (h *Handler) sandboxWrapCommand(cmd, session string) (string, bool) {
+	inner := "sh -c " + shellSingleQuote(cmd)
+
+	if !h.cfg.CoworkMode {
+		// Local Linux host: the sandbox resolves with the local vault. Pin SG_SESSION
+		// on the sandbox's own command line (inline, not `export`, so the user CMD
+		// cannot clobber it) so the sandbox records the rendered values in this
+		// session's ledger — that is what lets the PostToolUse leak-block withhold a
+		// rendered value if the command prints it. (In Cowork the host daemon records
+		// values independently, so no SG_SESSION is needed there.)
+		return "SG_SESSION=" + shellSingleQuote(session) +
+			" secrets-guard sandbox -- " + inner, true
+	}
+
+	// Cowork: mint the per-command anchor + one-time token.
 	if h.anchor == nil {
-		return "", false
-	}
-	t := strings.TrimSpace(cmd)
-	if t != "secrets-guard run" && !strings.HasPrefix(t, "secrets-guard run ") {
-		return "", false
-	}
-	// Single simple command only: reject anything that would create a SECOND
-	// command or run code, so the appended fd-3 here-string (the token) stays bound
-	// to this one cw-run invocation — chaining (`;`, newline, `&&`, `||`), pipes
-	// (`|`), command substitution (`$(`, backtick), and backgrounding (`&`). Plain
-	// redirections on the SAME simple command (`2>&1`, `>`, `<`) are SAFE: they
-	// commute with the token redirect, so they are allowed (a trailing `2>&1` must
-	// not defeat the secure path).
-	if strings.ContainsAny(t, ";\n|`") || strings.Contains(t, "$(") ||
-		strings.Contains(t, "&&") || strings.Contains(t, "||") || hasBackgroundAmp(t) {
 		return "", false
 	}
 	allowed := seen.LoadPaths(session)
@@ -533,15 +572,10 @@ func (h *Handler) coworkRewriteRun(cmd, session string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	args := strings.TrimSpace(strings.TrimPrefix(t, "secrets-guard run"))
 	var b strings.Builder
-	// The NON-SECRET anchor (host public key, exec id, auth fd) is passed via the
-	// ENVIRONMENT of the command, NOT argv. This is critical: the agent controls the
-	// `args` appended after `cw-run`, and a flag parser is last-wins, so anchor flags
-	// on argv could be overridden by an injected `--host-pub <attacker>`. An
-	// environment assignment in the command prefix cannot be overridden by later
-	// arguments, so cw-run reads the authoritative anchor from env. The host public
-	// key and exec id are non-secret; the one-time TOKEN stays on fd 3 only.
+	// Non-secret anchor via the ENVIRONMENT (authoritative; agent argv cannot
+	// override an env assignment in the command prefix). The one-time TOKEN stays on
+	// fd 3 only. The redirect binds to the outer `secrets-guard sandbox` command.
 	b.WriteString("SG_CW_HOSTPUB=")
 	b.WriteString(shellSingleQuote(hostPubB64))
 	b.WriteString(" SG_CW_EXECID=")
@@ -550,28 +584,11 @@ func (h *Handler) coworkRewriteRun(cmd, session string) (string, bool) {
 	if h.cfg.CoworkIsolate {
 		b.WriteString(" SG_CW_ISOLATE=1")
 	}
-	b.WriteString(" secrets-guard cw-run")
-	if args != "" {
-		b.WriteString(" ")
-		b.WriteString(args)
-	}
-	// One-time token on fd 3 via a here-string — never argv/env. Because the whole
-	// command is a single simple invocation, the redirect scopes exactly to it.
+	b.WriteString(" secrets-guard sandbox -- ")
+	b.WriteString(inner)
 	b.WriteString(" 3<<<")
 	b.WriteString(shellSingleQuote(tokenB64))
 	return b.String(), true
-}
-
-// hasBackgroundAmp reports whether s contains an `&` used for backgrounding (or
-// any chaining the caller has not already rejected) rather than as part of a
-// redirection fd-duplication (`2>&1`, `>&2`, `&>file`). It strips the redirection
-// forms first; any remaining `&` is a command-control operator and is rejected.
-func hasBackgroundAmp(s string) bool {
-	stripped := s
-	for _, p := range []string{">&", "<&", "&>"} {
-		stripped = strings.ReplaceAll(stripped, p, "")
-	}
-	return strings.Contains(stripped, "&")
 }
 
 func wrapBashCommand(toolInput json.RawMessage, selfPath, session string) (json.RawMessage, bool) {

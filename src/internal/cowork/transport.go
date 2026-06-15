@@ -17,7 +17,9 @@ const (
 	spoolSubdir = ".sg-cw"
 	// maxRefsPerRequest caps how many references a single request may ask for, so a
 	// rogue VM process cannot fan out a resolve-storm (Touch ID / rate) in one shot.
-	maxRefsPerRequest = 64
+	// The sandbox batches every reference found across env + files into one request,
+	// so this is generous (still bounded).
+	maxRefsPerRequest = 512
 	// maxRequestBytes caps the size of a request/response file we will read.
 	maxRequestBytes = 1 << 20 // 1 MiB
 	pollInterval    = 100 * time.Millisecond

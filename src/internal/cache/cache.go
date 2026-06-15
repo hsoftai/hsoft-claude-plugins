@@ -36,23 +36,43 @@ const minLen = 4
 // local process pre-bind an impostor daemon that answers `scan` as "clean",
 // silently disabling the resolved-value leak backstop. A 0700 dir keyed by uid
 // keeps other users out while staying short enough for macOS's ~104-byte unix
-// socket path limit. The dir is best-effort created by the caller.
+// socket path limit.
+//
+// SECURITY (CTF-9, impostor daemon): keying the dir by uid is not enough on its own.
+// On sticky /tmp a co-resident user can pre-create secrets-guard-sock-<victim-uid>
+// owned by THEMSELVES (mode 0700); the victim's MkdirAll then no-ops on the existing
+// attacker-owned dir, and the attacker can pre-bind the (session-derivable) socket
+// path. The victim's listen() sees a "live daemon" and the client's scan talks to
+// the IMPOSTOR, which answers `found:false` — silently disabling the leak backstop.
+// We therefore verify the dir is exclusively OUR own 0700 dir (seen.VerifyOwned, the
+// same guard the reference ledger uses) on every use, and return "" if not. Callers
+// treat "" as "cache unavailable" and FAIL CLOSED (the hook falls back to re-resolving
+// the recorded references via seen.Contains, which never trusts a foreign process).
 func socketDir() string {
-	if d := os.Getenv("SG_CACHE_DIR"); d != "" {
-		return d
+	dir := os.Getenv("SG_CACHE_DIR")
+	if dir == "" {
+		base := "/tmp"
+		if runtime.GOOS == "windows" {
+			base = os.TempDir()
+		}
+		dir = filepath.Join(base, fmt.Sprintf("secrets-guard-sock-%d", os.Getuid()))
 	}
-	base := "/tmp"
-	if runtime.GOOS == "windows" {
-		base = os.TempDir()
-	}
-	dir := filepath.Join(base, fmt.Sprintf("secrets-guard-sock-%d", os.Getuid()))
 	_ = os.MkdirAll(dir, 0o700)
+	if !seen.VerifyOwned(dir) {
+		return "" // missing/hijacked/loose-permissioned — refuse to trust a daemon here
+	}
 	return dir
 }
 
+// sockPath returns the per-session socket path, or "" when the socket directory is
+// not safely owned by us (callers must then treat the cache as unavailable).
 func sockPath(session string) string {
+	dir := socketDir()
+	if dir == "" {
+		return ""
+	}
 	h := sha256.Sum256([]byte(session))
-	return filepath.Join(socketDir(), "sgc-"+hex.EncodeToString(h[:])[:16]+".sock")
+	return filepath.Join(dir, "sgc-"+hex.EncodeToString(h[:])[:16]+".sock")
 }
 
 type request struct {
@@ -78,6 +98,12 @@ type server struct {
 // RunDaemon serves the cache for one session until shutdown or idle timeout.
 func RunDaemon(session string) error {
 	path := sockPath(session)
+	if path == "" {
+		// Socket dir is not exclusively ours (hijacked / loose-permissioned). Do NOT
+		// bind a daemon there — a co-resident impostor could be squatting it. Fail
+		// closed: callers fall back to the on-disk reference ledger (seen.Contains).
+		return fmt.Errorf("cache socket dir unavailable or not exclusively owned")
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -175,6 +201,11 @@ func New() Client { return Client{} }
 
 func roundtrip(session string, rq request, spawnIfDown bool) (response, bool) {
 	path := sockPath(session)
+	if path == "" {
+		// Socket dir not exclusively ours: treat the cache as unavailable so the caller
+		// falls back to the on-disk ledger instead of trusting a possible impostor.
+		return response{}, false
+	}
 	conn, err := net.DialTimeout("unix", path, 500*time.Millisecond)
 	if err != nil {
 		if !spawnIfDown || !spawnDaemon(session) {

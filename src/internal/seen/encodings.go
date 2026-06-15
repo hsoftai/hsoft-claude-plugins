@@ -28,10 +28,23 @@ func variants(v string) []string {
 	add(v) // raw
 
 	// base64 (standard + URL-safe, padded + unpadded)
-	add(base64.StdEncoding.EncodeToString(b))
+	std := base64.StdEncoding.EncodeToString(b)
+	add(std)
 	add(base64.RawStdEncoding.EncodeToString(b))
 	add(base64.URLEncoding.EncodeToString(b))
 	add(base64.RawURLEncoding.EncodeToString(b))
+
+	// Line-WRAPPED base64. The single-line encodings above do NOT appear as a
+	// substring once a tool wraps the output: `base64`/`openssl base64`, MIME, and
+	// PEM all break the stream into fixed-width lines, so `echo -n "$SECRET" | base64`
+	// (the most obvious exfil one-liner) and reading a wrapped file would slip past a
+	// substring leak-block. Guard the standard wrap widths (76 = GNU coreutils default,
+	// 64 = openssl/PEM/MIME) with LF and CRLF separators so the wrapped form is matched
+	// and redacted too.
+	for _, width := range []int{76, 64} {
+		add(wrapLines(std, width, "\n"))
+		add(wrapLines(std, width, "\r\n"))
+	}
 
 	// base32
 	add(base32.StdEncoding.EncodeToString(b))
@@ -70,6 +83,29 @@ func variants(v string) []string {
 		out = append(out, s)
 	}
 	return out
+}
+
+// wrapLines re-emits s broken into lines of at most width characters joined by sep
+// (no trailing separator), matching how base64/openssl/MIME/PEM wrap their output.
+// Returns s unchanged when it already fits on one line, so no spurious extra variant
+// is added for short values.
+func wrapLines(s string, width int, sep string) string {
+	if width <= 0 || len(s) <= width {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + (len(s)/width+1)*len(sep))
+	for i := 0; i < len(s); i += width {
+		if i > 0 {
+			b.WriteString(sep)
+		}
+		end := i + width
+		if end > len(s) {
+			end = len(s)
+		}
+		b.WriteString(s[i:end])
+	}
+	return b.String()
 }
 
 // reverseBytes returns b reversed (matches `rev` on ASCII secrets).

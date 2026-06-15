@@ -1,7 +1,7 @@
 {
   "name": "secrets-guard",
   "displayName": "secrets-guard",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Keep secrets out of the model: block plaintext secrets in prompts, resolve vault references (Keeper/1Password) into tool input, and redact secrets leaked in tool output.",
   "author": {
     "name": "Humphrey Consulting Group"
@@ -85,14 +85,26 @@
     "cowork_isolate": {
       "type": "boolean",
       "title": "Cowork VM isolation",
-      "description": "When true, wrap the VM child in an unprivileged user/pid/mount namespace (unshare) so other VM processes cannot inspect its /proc. Defense-in-depth on top of the never-transmitted private key; off by default because it changes the child's process view.",
+      "description": "When true, also add a pid/mount-proc namespace to the per-command sandbox so other VM processes cannot inspect its /proc. Defense-in-depth on top of the never-transmitted private key; off by default because it changes the child's process view.",
       "default": false
     },
     "cowork_ref_policy": {
       "type": "string",
       "title": "Cowork reference policy",
-      "description": "'enforce' (default) resolves only references the host approved for the command this session; 'audit' resolves any requested reference and logs it (less safe — opt-in).",
-      "default": "enforce"
+      "description": "'audit' (default) resolves any reference the per-command one-time-token-authenticated request asks for and logs each; 'enforce' resolves only references the host observed being written this session (stricter, but breaks transparent rendering of references the host never saw).",
+      "default": "audit"
+    },
+    "sandbox": {
+      "type": "string",
+      "title": "Secret-rendering sandbox",
+      "description": "Render vault references into real values — in the environment AND in files under the working directory — inside an ephemeral per-command mount namespace, so apps that read secrets from config files (not just 'secrets-guard run --env-file') just work. 'auto' (default) enables it in Cowork and on a Linux Claude Code host; 'on' forces it; 'off' disables it (macOS/Windows always fall back to environment-only rendering).",
+      "default": "auto"
+    },
+    "sandbox_globs": {
+      "type": "string",
+      "title": "Sandbox file globs",
+      "description": "Comma-separated filename globs the sandbox scans for references under the working directory, overriding the default set (.env, .env.*, *.env, *.yaml, *.yml, *.json, *.toml, *.ini, *.properties, *.conf, *.cfg, *.config, *.tfvars, *.envrc). Keep it targeted so the scan stays fast on large repos.",
+      "default": ""
     }
   }
 }

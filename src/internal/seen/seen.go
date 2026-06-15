@@ -10,6 +10,7 @@ package seen
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -24,7 +25,51 @@ const minLen = 4
 // Placeholder replaces a recognized resolved value in redacted output.
 const Placeholder = "[REDACTED BY SECRETS-GUARD]"
 
-func dir() string { return filepath.Join(os.TempDir(), "secrets-guard-paths") }
+// dir returns a PRIVATE per-user state directory for the reference ledger — NOT a
+// bare, shared, world-known path in /tmp. Bare /tmp (sticky 1777) plus a fixed
+// directory name let any local user pre-create `secrets-guard-paths` owned by
+// themselves (mode 0700): the victim's MkdirAll then no-ops on the existing dir
+// and every RecordPaths write fails (no write permission in the attacker-owned
+// dir), so the ledger stays empty and the resolved-value leak backstop (the
+// PreToolUse known-value DENY and the PostToolUse leak-block, which fall back to
+// re-resolving these paths when the in-memory cache is down) is silently disabled.
+// Keying the directory by uid keeps other users out; verifyOwned re-checks it is
+// our own 0700 dir on every use so a pre-planted dir is rejected, not adopted.
+func dir() string {
+	// SG_PATHS_DIR pins the ledger directory explicitly. The sandbox sets this when
+	// it re-execs under `unshare --map-root-user` (where os.Getuid() is the mapped 0,
+	// not the host uid) so the ledger it writes lands in the SAME per-host-uid
+	// directory the host hooks read — otherwise the rendered-value leak backstop is
+	// silently keyed to a uid-0 path the host never consults.
+	if d := os.Getenv("SG_PATHS_DIR"); d != "" {
+		_ = os.MkdirAll(d, 0o700)
+		return d
+	}
+	d := filepath.Join(os.TempDir(), fmt.Sprintf("secrets-guard-paths-%d", os.Getuid()))
+	_ = os.MkdirAll(d, 0o700)
+	return d
+}
+
+// VerifyOwned reports whether dir is a directory we own exclusively (mode 0700, no
+// group/other access). It is the shared ownership guard used by every per-user state
+// directory in secrets-guard (the reference ledger here, and the cache socket dir in
+// internal/cache) so a co-resident user cannot pre-plant a directory and intercept
+// the backstop. Exported so other packages can reuse the exact same check.
+func VerifyOwned(dir string) bool { return verifyOwned(dir) }
+
+// verifyOwned reports whether dir is a directory we own with no access for group
+// or other (mode 0700). A pre-planted, attacker-owned, or loosely-permissioned dir
+// fails this check, so the caller refuses to read/write the ledger through it.
+func verifyOwned(dir string) bool {
+	fi, err := os.Lstat(dir)
+	if err != nil || !fi.IsDir() {
+		return false
+	}
+	if fi.Mode().Perm()&0o077 != 0 {
+		return false // group/other have access — not exclusively ours
+	}
+	return ownedByUs(fi) // platform check: refuse a dir owned by another user
+}
 
 // Path returns the per-session reference ledger file (sanitized session id).
 func Path(session string) string {
@@ -37,7 +82,11 @@ func Path(session string) string {
 	if s == "" {
 		s = "default"
 	}
-	return filepath.Join(dir(), s+".paths")
+	d := dir()
+	if !verifyOwned(d) {
+		return "" // dir is missing/hijacked/loose-permissioned — refuse to use it
+	}
+	return filepath.Join(d, s+".paths")
 }
 
 // RecordPaths appends vault references (not secret) to the session ledger,
@@ -46,12 +95,15 @@ func RecordPaths(session string, refs []string) {
 	if len(refs) == 0 {
 		return
 	}
+	path := Path(session)
+	if path == "" {
+		return // ledger dir is not safely owned by us — fail closed, do not write
+	}
 	existing := map[string]struct{}{}
 	for _, p := range LoadPaths(session) {
 		existing[p] = struct{}{}
 	}
-	_ = os.MkdirAll(dir(), 0o700)
-	f, err := os.OpenFile(Path(session), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return
 	}

@@ -170,8 +170,10 @@ or interactively with `/plugin configure secrets-guard@hsoft-claude-plugins`.
 | `audit_log_path` | – | path for value-free JSON-line audit log |
 | `execution_mode` | `auto` | `auto`, `local`, `cowork` |
 | `cowork_spool` | – | host path of the Cowork `outputs` mount (auto-derived from `CLAUDE_PROJECT_DIR`) |
-| `cowork_isolate` | `false` | wrap the VM child in a user/pid/mount namespace (`unshare`) |
-| `cowork_ref_policy` | `enforce` | `enforce` (host-approved refs only) or `audit` |
+| `cowork_isolate` | `false` | add a pid/mount-proc namespace to the per-command sandbox |
+| `cowork_ref_policy` | `audit` | `audit` (any token-authorized ref + log) or `enforce` (host-observed refs only) |
+| `sandbox` | `auto` | transparent env+file rendering sandbox: `auto` / `on` / `off` |
+| `sandbox_globs` | – | comma-separated globs the sandbox scans for references (overrides defaults) |
 
 ## Build from source
 

@@ -113,6 +113,40 @@ func TestKeeper_ListItemsAndFields(t *testing.T) {
 	}
 }
 
+// TestKeeper_ListFields_RejectsFlagLikeItem ensures a model-supplied item UID
+// that looks like a flag cannot be smuggled as a `ksm` option (argument
+// injection). The guard must fail closed BEFORE the CLI is ever invoked —
+// parity with the 1Password ListFields flagLike check.
+func TestKeeper_ListFields_RejectsFlagLikeItem(t *testing.T) {
+	// A runner that records every invocation, so we can assert ksm is never run.
+	var ran [][]string
+	m := &recordingRunner{present: map[string]bool{"ksm": true}, ran: &ran}
+	c, _ := Select("keeper", m, "")
+
+	for _, bad := range []string{"--uid", "-x", "--format=json", "--output-dir=/tmp/x"} {
+		ran = nil
+		_, err := c.ListFields(bad, "", "")
+		if err == nil {
+			t.Fatalf("expected rejection for flag-like item %q", bad)
+		}
+		if len(ran) != 0 {
+			t.Fatalf("ksm was invoked with flag-like item %q: %v", bad, ran)
+		}
+	}
+}
+
+// recordingRunner records the args of every Run call (and returns no output).
+type recordingRunner struct {
+	present map[string]bool
+	ran     *[][]string
+}
+
+func (r *recordingRunner) Look(name string) bool { return r.present[name] }
+func (r *recordingRunner) Run(name string, args ...string) (string, error) {
+	*r.ran = append(*r.ran, append([]string{name}, args...))
+	return "", &noOutErr{name + " " + strings.Join(args, " ")}
+}
+
 func TestOnePassword_ListVaultsAndVaultFilter(t *testing.T) {
 	m := &mockRunner{
 		present: map[string]bool{"op": true},

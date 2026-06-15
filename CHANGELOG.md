@@ -6,6 +6,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-15
+
+### Added
+- **Transparent per-command secret-rendering sandbox.** The host hook now wraps
+  every Bash command as `secrets-guard sandbox -- sh -c '<command>'`. The sandbox
+  finds vault references in the **environment** and in **matched files** under the
+  working directory (`.env`, `config.yaml`, `settings.json`, `package.json`, …,
+  configurable via `sandbox_globs`), resolves them (local vault, or the sealed-box
+  channel in the Cowork VM), enters an unprivileged user+mount namespace, renders
+  the environment, and **bind-mounts a rendered copy** of each ref-file over the
+  original — so apps that read secrets from files just work, not only
+  `secrets-guard run --env-file`. The real disk is untouched; rendered values live
+  only in an in-memory tmpfs that the kernel discards when the command exits. Any
+  command works (pipes, `&&`, redirections, multi-line) — the original is a single
+  quoted `sh -c` argument, so the brittle "single simple command" guard is gone.
+  Linux only (Cowork VM + Linux Claude Code host); macOS/Windows render the
+  environment only. New options: `sandbox` (`auto`/`on`/`off`), `sandbox_globs`.
+  Adversarial-reviewed (no Critical/High; renderer hardened against symlink/TOCTOU
+  via `O_NOFOLLOW` + `/proc/self/fd` validation and bind-over-inode).
+
+### Changed
+- **`cowork_ref_policy` default is now `audit`** (resolve any reference the
+  per-command one-time-token-authenticated request asks for, and log each). The
+  per-command token is the authorization boundary; `enforce` (only host-observed
+  refs) remains as opt-in hardening. This is what lets the sandbox render
+  references the host never saw being written.
+
 ## [0.3.2] - 2026-06-15
 
 ### Fixed
@@ -41,8 +68,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bounds what each command can fetch; optional `cowork_isolate` wraps the VM child in
   a namespace. Detection is automatic via `CLAUDE_CODE_IS_COWORK`. New options:
   `execution_mode` (`auto`/`local`/`cowork`), `cowork_spool` (auto-derived from
-  `CLAUDE_PROJECT_DIR`), `cowork_isolate`, `cowork_ref_policy`. Adversarial-reviewed
-  (no Critical/High). Plain Claude Code is unchanged. See `docs/cowork.md`.
+  `CLAUDE_PROJECT_DIR`), `cowork_isolate`, `cowork_ref_policy`. Plain Claude Code is
+  unchanged. See `docs/cowork.md`.
+- **Renders three surfaces, escape-aware.** Vault references are rendered in (1)
+  files under cwd, (2) environment variables, and (3) the Bash command body itself;
+  a leading backslash (`\op://…`) keeps an occurrence literal (the backslash is
+  stripped), matching the inline `command_references` escape.
+
+### Security
+- **Ten-round adversarial hardening of the sandbox + leak-block.** Fixed: the local
+  sandbox wrap now pins `SG_SESSION` so rendered values are recorded for the
+  leak-block; the `seen` ledger and the `cache` socket are per-uid + ownership-verified
+  + fail-closed (anti hijack/poison/impostor-daemon); the leak-block now covers
+  line-wrapped base64 (76/64-col); per-command exec tokens are reaped on a freshness
+  window + GC (no lingering replay); the file-render leak-block is pinned across the
+  `unshare` uid-map boundary; `tool_output_mode=off` no longer disables the
+  resolved-value backstop; the Keeper catalog rejects flag-like ids (ksm
+  arg-injection); and `knownInText` corroborates a cache miss against the durable
+  ledger (no amnesiac-cache fail-open). No Critical/High remaining.
 
 ## [0.2.0] - 2026-06-14
 

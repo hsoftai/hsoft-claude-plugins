@@ -67,3 +67,51 @@ func TestScan_NoDaemonReturnsNotOK(t *testing.T) {
 		t.Fatalf("scan with no daemon must return ok=false: ok=%v found=%v", ok, found)
 	}
 }
+
+// CTF-9 regression: the cache socket directory must be exclusively OUR own 0700 dir.
+// On sticky /tmp a co-resident user could pre-create secrets-guard-sock-<victim-uid>
+// (or it could be left loose-permissioned) and squat an impostor daemon that answers
+// `scan` as clean — silently disabling the resolved-value leak backstop. The cache
+// must refuse a non-exclusively-owned dir and FAIL CLOSED: sockPath()=="" , the
+// daemon refuses to bind, and the client reports the cache unavailable (so the hook
+// falls back to the on-disk reference ledger instead of trusting a foreign process).
+func TestSocketDirOwnershipFailsClosed(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root: 0o077 perm bits do not exclude the owner check meaningfully")
+	}
+	d, err := os.MkdirTemp("/tmp", "sgc-hijack")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(d) })
+	// Loosely-permissioned (group/other-accessible) dir: not exclusively ours.
+	if err := os.Chmod(d, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SG_CACHE_DIR", d)
+
+	if p := sockPath("sess-hijack"); p != "" {
+		t.Fatalf("sockPath must be empty for a non-exclusively-owned dir, got %q", p)
+	}
+
+	// The daemon must refuse to bind under such a dir.
+	if err := RunDaemon("sess-hijack"); err == nil {
+		t.Fatal("RunDaemon must refuse a non-exclusively-owned socket dir")
+	}
+
+	// The client must report the cache as unavailable (ok=false) so the caller falls
+	// back to the on-disk ledger rather than trusting an impostor's "clean" answer.
+	if found, _, ok := New().Scan("sess-hijack", "value SUPERSECRETVALUE here"); ok || found {
+		t.Fatalf("scan over an unsafe socket dir must fail closed: ok=%v found=%v", ok, found)
+	}
+	// Add must be a no-op (must not spawn a daemon into the poisoned dir).
+	New().Add("sess-hijack", []string{"SUPERSECRETVALUE"})
+
+	// And once the dir is tightened to 0700 (exclusively ours), the cache works again.
+	if err := os.Chmod(d, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if p := sockPath("sess-hijack"); p == "" {
+		t.Fatal("sockPath must be non-empty once the dir is a proper 0700 owned dir")
+	}
+}

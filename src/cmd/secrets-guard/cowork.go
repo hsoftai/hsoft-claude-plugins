@@ -48,9 +48,30 @@ func (coworkAnchor) Mint(session string, allowed []string) (execID, hostPubB64, 
 	return mintExec(session, allowed)
 }
 
-// execTTL bounds how long a minted exec token is valid (a generous window that
-// still covers a Touch-ID prompt). After it the daemon ignores the exec.
+// execTTL is the ABSOLUTE hard cap on how long a minted exec record may ever live
+// (defense in depth). A record older than this is always ignored and reaped.
 const execTTL = 30 * time.Minute
+
+// execFreshness bounds how long a minted-but-UNCLAIMED exec token stays valid.
+//
+// SECURITY (lingering-token replay): the per-command one-time token is materialized
+// into the VM (SG_CW_EXECID in the command env + the token on the command's heredoc
+// fd), so any co-resident VM process / `ps` / shell history can observe it. The
+// record is only retired after a successful fetch (OnServed). But the MAJORITY of
+// commands take the sandbox FAST PATH (no references => no fetch => OnServed never
+// fires), so without this bound their token would stay replayable for the full
+// execTTL (30 min) and the records would accumulate without limit. The legitimate
+// VM writes its request within seconds of the mint, so a few minutes is ample for a
+// real fetch (the host-side Touch-ID prompt happens AFTER the request arrives, by
+// which point the exchange is already in flight and matched). Past this window an
+// un-served token is reaped and refused — collapsing the replay window for every
+// no-fetch command from 30 minutes to a tight bound. It is set generously enough to
+// survive a human permission-approval delay between PreToolUse (mint) and the
+// command actually running, while still being a 3x reduction of the absolute TTL.
+const execFreshness = 10 * time.Minute
+
+// gcSweepInterval is how often the host daemon reaps stale exec records.
+const gcSweepInterval = 30 * time.Second
 
 // coworkFetchTimeout is how long cw-run waits for the host to answer.
 const coworkFetchTimeout = 90 * time.Second
@@ -181,8 +202,16 @@ func lookupExec(session, execID string) (token []byte, allowed []string, ok bool
 	if json.Unmarshal(data, &rec) != nil {
 		return nil, nil, false
 	}
-	if rec.Stamp > 0 && time.Since(time.Unix(rec.Stamp, 0)) > execTTL {
-		return nil, nil, false
+	// An un-served token is only valid for a tight freshness window (the legitimate
+	// VM fetches within seconds of the mint). Past it — or past the absolute cap —
+	// the record is refused AND reaped so a leaked-but-never-fetched token (the
+	// fast-path case) cannot be replayed for the full TTL.
+	if rec.Stamp > 0 {
+		age := time.Since(time.Unix(rec.Stamp, 0))
+		if age > execFreshness || age > execTTL {
+			retireExec(session, execID)
+			return nil, nil, false
+		}
 	}
 	tok, derr := base64.StdEncoding.DecodeString(rec.TokenB64)
 	if derr != nil || len(tok) == 0 {
@@ -196,6 +225,41 @@ func retireExec(session, execID string) {
 	if dir, err := coworkHostDir(session); err == nil {
 		_ = os.Remove(filepath.Join(dir, "exec-"+safeName(execID)+".json"))
 	}
+}
+
+// gcStaleExecs reaps exec records past the freshness window. A token for a command
+// that never fetched (the sandbox fast path: no references => OnServed never fires)
+// is never retired on serve, so without this sweep it would linger — replayable —
+// until execTTL and the host-only dir would accumulate records without bound. The
+// sweep keys off each record's persisted Stamp (mtime is a fallback) so a single-use
+// token's replay window is collapsed to execFreshness for every no-fetch command.
+func gcStaleExecs(session string) {
+	dir, err := coworkHostDir(session)
+	if err != nil {
+		return
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, "exec-*.json"))
+	for _, p := range matches {
+		if execRecordStale(p) {
+			_ = os.Remove(p)
+		}
+	}
+}
+
+// execRecordStale reports whether the exec record at path is past its freshness
+// window. It keys off the persisted Stamp; an unreadable/unparsable record falls
+// back to the file mtime against the absolute TTL.
+func execRecordStale(path string) bool {
+	if data, err := os.ReadFile(path); err == nil {
+		var rec execRecord
+		if json.Unmarshal(data, &rec) == nil && rec.Stamp > 0 {
+			return time.Since(time.Unix(rec.Stamp, 0)) > execFreshness
+		}
+	}
+	if fi, err := os.Stat(path); err == nil {
+		return time.Since(fi.ModTime()) > execTTL
+	}
+	return false
 }
 
 // runCwHost is the HOST daemon: it answers VM requests over the spool for one
@@ -239,10 +303,14 @@ func runCwHost() {
 		},
 		OnResolve: func(ref, value string) {
 			// Register on the host so PostToolUse can detect/redact the value if it
-			// later reappears in the VM's tool output.
+			// later reappears in the VM's tool output (this is what keeps a
+			// command-body-rendered value from ever reaching the model).
 			cache.New().Add(session, []string{value})
 			seen.RecordPaths(session, []string{ref})
-			aud.Log(audit.Record{SessionID: session, Event: "Cowork", Action: "resolve", Count: 1})
+			// Under the `audit` policy the host resolves any token-authorized ref, so
+			// record WHICH reference was resolved (the path is not secret) to keep a
+			// real, value-free audit trail.
+			aud.Log(audit.Record{SessionID: session, Event: "Cowork", Action: "resolve", Categories: []string{ref}, Count: 1})
 		},
 		OnServed: func(execID string) { retireExec(session, execID) },
 	}
@@ -254,6 +322,23 @@ func runCwHost() {
 		<-ch
 		close(stop)
 	}()
+
+	// Reap stale/never-fetched exec records (collapses the lingering-token replay
+	// window for fast-path commands and bounds host-only dir growth).
+	go func() {
+		t := time.NewTicker(gcSweepInterval)
+		defer t.Stop()
+		gcStaleExecs(session)
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				gcStaleExecs(session)
+			}
+		}
+	}()
+
 	_ = cowork.Watch(spool, opts, coworkIdle, stop)
 }
 

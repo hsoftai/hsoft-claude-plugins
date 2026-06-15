@@ -26,7 +26,13 @@ type Config struct {
 	ExecutionMode   string // auto | local | cowork
 	CoworkSpool     string // host-side path of the shared `outputs` mount (= CLAUDE_PROJECT_DIR)
 	CoworkIsolate   bool   // wrap the VM child in a user/pid/mount namespace (unshare)
-	CoworkRefPolicy string // enforce (default) | audit — allowlist refs the host approved
+	CoworkRefPolicy string // audit (default) | enforce — resolve any token-authed ref, or only host-approved
+
+	// Sandbox renders vault references (in env AND in matched files under cwd) into
+	// real values inside an ephemeral per-command mount namespace, so apps that read
+	// secrets from files — not just `secrets-guard run --env-file` — just work.
+	Sandbox      string // auto | on | off
+	SandboxGlobs string // comma-separated globs overriding the default scan set
 
 	// IsCowork is the resolved detection: true when this process is the Cowork host
 	// hook (the agent's commands run in the VM). Deterministic via
@@ -48,7 +54,8 @@ func Load(env Getenv) Config {
 		ToolOutputMode:      "redact",
 		CommandReferences:   "inject",
 		ExecutionMode:       "auto",
-		CoworkRefPolicy:     "enforce",
+		CoworkRefPolicy:     "audit",
+		Sandbox:             "auto",
 	}
 
 	c.VaultProvider = oneOf(env(prefix+"VAULT_PROVIDER"), c.VaultProvider, "auto", "keeper", "1password")
@@ -65,6 +72,8 @@ func Load(env Getenv) Config {
 	c.CoworkSpool = strings.TrimSpace(env(prefix + "COWORK_SPOOL"))
 	c.CoworkIsolate = boolOr(env(prefix+"COWORK_ISOLATE"), false)
 	c.CoworkRefPolicy = oneOf(env(prefix+"COWORK_REF_POLICY"), c.CoworkRefPolicy, "audit", "enforce")
+	c.Sandbox = oneOf(env(prefix+"SANDBOX"), c.Sandbox, "auto", "on", "off")
+	c.SandboxGlobs = strings.TrimSpace(env(prefix + "SANDBOX_GLOBS"))
 
 	// Detect the Cowork host hook (the agent's commands run in the VM). The detector
 	// is deterministic — Claude Code sets CLAUDE_CODE_IS_COWORK=1 in the host hook's
@@ -83,6 +92,29 @@ func Load(env Getenv) Config {
 		c.CoworkSpool = strings.TrimSpace(env("CLAUDE_PROJECT_DIR"))
 	}
 	return c
+}
+
+// SandboxWrap reports whether the hook should wrap a Bash command with the
+// `secrets-guard sandbox` runner (transparent env+file rendering). goos is the OS
+// where THIS process (the hook) runs; hasVault indicates a local vault is present.
+//
+// In Cowork the command runs in the Linux VM, so the sandbox always applies there
+// regardless of the host hook's OS. For plain Claude Code the command runs on this
+// host, so the file sandbox (mount namespaces) requires goos == "linux".
+func (c Config) SandboxWrap(goos string, hasVault bool) bool {
+	if c.Sandbox == "off" {
+		return false
+	}
+	if c.IsCowork {
+		return true
+	}
+	if goos != "linux" {
+		return false // macOS/Windows host: keep the inline/env behavior
+	}
+	if c.Sandbox == "on" {
+		return true
+	}
+	return hasVault // auto: on for a Linux host that can resolve locally
 }
 
 func boolOr(v string, def bool) bool {
