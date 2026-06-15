@@ -625,5 +625,20 @@ func toHookConfig(c config.Config, vaultName string) hook.Config {
 		// Wrap Bash commands in `secrets-guard sandbox` (env + file rendering) on
 		// Cowork and on a Linux Claude Code host; macOS/Windows keep the inline path.
 		SandboxMode: c.SandboxWrap(runtime.GOOS, vaultName != "none"),
+		ShellTools:  splitList(c.ShellTools),
 	}
+}
+
+// splitList splits a comma-separated option into trimmed, non-empty entries.
+func splitList(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

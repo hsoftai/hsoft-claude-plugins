@@ -1,7 +1,7 @@
 {
   "name": "secrets-guard",
   "displayName": "secrets-guard",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Keep secrets out of the model: block plaintext secrets in prompts, resolve vault references (Keeper/1Password) into tool input, and redact secrets leaked in tool output.",
   "author": {
     "name": "Humphrey Consulting Group"
@@ -104,6 +104,12 @@
       "type": "string",
       "title": "Sandbox file globs",
       "description": "Comma-separated filename globs the sandbox scans for references under the working directory, overriding the default set (.env, .env.*, *.env, *.yaml, *.yml, *.json, *.toml, *.ini, *.properties, *.conf, *.cfg, *.config, *.tfvars, *.envrc). Keep it targeted so the scan stays fast on large repos.",
+      "default": ""
+    },
+    "shell_tools": {
+      "type": "string",
+      "title": "Extra shell tool names",
+      "description": "Comma-separated extra tool names to treat as shell command execution (wrap + redact), beyond the built-in 'Bash' and the MCP shell pattern (any name ending in '__bash'/'__shell', e.g. Cowork's mcp__workspace__bash). Use only if a host exposes a shell under a name the pattern doesn't catch.",
       "default": ""
     }
   }

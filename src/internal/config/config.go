@@ -19,6 +19,7 @@ type Config struct {
 	CustomPatternsPath  string
 	AllowlistPath       string
 	AuditLogPath        string
+	ShellTools          string // comma-separated extra shell tool names to wrap/redact
 
 	// Cowork mode: the agent's commands run in an isolated VM with no vault CLI.
 	// Resolution happens on the host; values are delivered to the VM over the
@@ -67,6 +68,7 @@ func Load(env Getenv) Config {
 	c.CustomPatternsPath = env(prefix + "CUSTOM_PATTERNS_PATH")
 	c.AllowlistPath = env(prefix + "ALLOWLIST_PATH")
 	c.AuditLogPath = env(prefix + "AUDIT_LOG_PATH")
+	c.ShellTools = strings.TrimSpace(env(prefix + "SHELL_TOOLS"))
 
 	c.ExecutionMode = oneOf(env(prefix+"EXECUTION_MODE"), c.ExecutionMode, "auto", "local", "cowork")
 	c.CoworkSpool = strings.TrimSpace(env(prefix + "COWORK_SPOOL"))

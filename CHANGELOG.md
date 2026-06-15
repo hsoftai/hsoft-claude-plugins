@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-15
+
+### Fixed
+- **Cowork: the protection now applies to the MCP shell tool.** In Cowork the agent
+  runs shell commands through `mcp__workspace__bash`, not the `Bash` tool. The hook
+  matched `tool_name == "Bash"` exactly, so it **ignored** Cowork's shell tool —
+  references passed through unrendered and unredacted. The hook now treats any
+  command-execution shell tool as such: `Bash`, a bare `bash`/`shell`, and the MCP
+  shell pattern (`…__bash` / `…__shell`, e.g. `mcp__workspace__bash`), plus an
+  explicit `shell_tools` allowlist option. PostToolUse now also walks every string
+  leaf of the response, so a leaked value is blocked regardless of the response
+  shape (the MCP content shape, not just `{stdout,stderr}`). Verified end-to-end in
+  a Linux container driving the real plugin under the exact hook protocol.
+
 ## [0.4.0] - 2026-06-15
 
 ### Added

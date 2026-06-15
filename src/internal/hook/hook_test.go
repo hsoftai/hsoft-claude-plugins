@@ -703,3 +703,57 @@ func jsonStr(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
 }
+
+func TestIsShellTool(t *testing.T) {
+	h := newHandler(defaultCfg())
+	yes := []string{"Bash", "mcp__workspace__bash", "mcp__workspace__shell", "workspace__bash", "bash", "Shell", "shell"}
+	no := []string{"BashOutput", "Read", "Write", "Grep", "mcp__workspace__edit", "Task"}
+	for _, n := range yes {
+		if !h.isShellTool(n) {
+			t.Fatalf("%q should be a shell tool", n)
+		}
+	}
+	for _, n := range no {
+		if h.isShellTool(n) {
+			t.Fatalf("%q should NOT be a shell tool", n)
+		}
+	}
+	// extra names via config
+	cfg := defaultCfg()
+	cfg.ShellTools = []string{"mcp__custom__exec"}
+	h2 := newHandler(cfg)
+	if !h2.isShellTool("mcp__custom__exec") {
+		t.Fatal("shell_tools config entry should match")
+	}
+}
+
+// The Cowork MCP shell tool (mcp__workspace__bash) must be wrapped just like Bash.
+func TestPreToolUse_McpBashIsWrapped(t *testing.T) {
+	h := newHandler(coworkSandboxCfg())
+	h.SetCoworkAnchor(fakeAnchor{})
+	out := h.Handle(Input{
+		HookEventName: "PreToolUse", ToolName: "mcp__workspace__bash", SessionID: "s1",
+		ToolInput: json.RawMessage(`{"command":"cat .env"}`),
+	})
+	if out.HookSpecificOutput == nil || out.HookSpecificOutput.UpdatedInput == nil {
+		t.Fatalf("mcp__workspace__bash must be wrapped, got %+v", out)
+	}
+	var m map[string]any
+	_ = json.Unmarshal(out.HookSpecificOutput.UpdatedInput, &m)
+	if cmd, _ := m["command"].(string); !strings.Contains(cmd, "secrets-guard sandbox -- sh -c 'cat .env'") {
+		t.Fatalf("not wrapped: %s", cmd)
+	}
+}
+
+// A leaked value in the MCP content-shaped tool_response must still be blocked.
+func TestPostToolUse_McpContentShapeBlocksLeak(t *testing.T) {
+	cfg := defaultCfg()
+	h := NewHandler(cfg, detect.New(), redact.New(detect.New()), fakeResolver{value: "RESOLVED_SECRET"}, knownCache{}, "/opt/sg/bin/secrets-guard")
+	out := h.Handle(Input{
+		HookEventName: "PostToolUse", ToolName: "mcp__workspace__bash", SessionID: "s1",
+		ToolResponse: json.RawMessage(`{"content":[{"type":"text","text":"the value is RESOLVED_SECRET here"}]}`),
+	})
+	if out.Decision != "block" {
+		t.Fatalf("MCP-shaped output leak must be blocked, got %+v", out)
+	}
+}

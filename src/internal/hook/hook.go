@@ -95,6 +95,9 @@ type Config struct {
 	// per-command mount namespace. On a Cowork host this also carries the anchor +
 	// one-time token (CoworkMode). True on Cowork and on a Linux Claude Code host.
 	SandboxMode bool
+	// ShellTools are extra tool names (beyond "Bash" and the built-in MCP shell
+	// pattern) to treat as command-execution tools, from the shell_tools option.
+	ShellTools []string
 }
 
 // CoworkAnchor mints, per command, the trust anchor for a fetch that will run in
@@ -289,7 +292,7 @@ func (h *Handler) handlePreTool(in Input) Output {
 		updated      json.RawMessage
 		changed      bool
 	)
-	if in.ToolName == "Bash" {
+	if h.isShellTool(in.ToolName) {
 		var m map[string]any
 		if json.Unmarshal(in.ToolInput, &m) == nil {
 			if cmd, ok := m["command"].(string); ok && cmd != "" {
@@ -364,7 +367,7 @@ func (h *Handler) handlePreTool(in Input) Output {
 	// 3) For Bash in redact mode, wrap the command so its output is redacted at
 	// the source (PostToolUse output rewriting is not honored by Claude Code).
 	wrapped := false
-	if in.ToolName == "Bash" && h.cfg.ToolOutputMode == "redact" && h.selfPath != "" && !h.cfg.CoworkMode && !h.cfg.SandboxMode {
+	if h.isShellTool(in.ToolName) && h.cfg.ToolOutputMode == "redact" && h.selfPath != "" && !h.cfg.CoworkMode && !h.cfg.SandboxMode {
 		base := updated
 		if base == nil {
 			base = in.ToolInput
@@ -398,12 +401,39 @@ func (h *Handler) handlePreTool(in Input) Output {
 	}}
 }
 
+// isShellTool reports whether tool_name is a command-execution (shell) tool whose
+// `command` input should be wrapped by the sandbox and whose output should be
+// redacted. It matches "Bash" (Claude Code), the MCP shell tools Cowork exposes
+// (e.g. `mcp__workspace__bash`, `…__shell`) by suffix, a bare `bash`/`shell`, and
+// any explicit names from the shell_tools option. It deliberately does NOT match
+// helper tools like "BashOutput".
+func (h *Handler) isShellTool(name string) bool {
+	if name == "Bash" {
+		return true
+	}
+	for _, t := range h.cfg.ShellTools {
+		if name == t {
+			return true
+		}
+	}
+	l := strings.ToLower(name)
+	return l == "bash" || l == "shell" ||
+		strings.HasSuffix(l, "__bash") || strings.HasSuffix(l, "__shell")
+}
+
 func (h *Handler) handlePostTool(in Input) Output {
 	if len(in.ToolResponse) == 0 {
 		h.Last = Decision{Event: "PostToolUse", Action: "allow"}
 		return Output{}
 	}
+	// Scan EVERY string leaf of the response, not just a top-level string. Bash
+	// returns {stdout,stderr,…} and the Cowork MCP shell tool returns an MCP content
+	// shape ({content:[{type:"text",text:…}]}) — walking all leaves catches a leaked
+	// value regardless of the response shape.
 	text := toText(in.ToolResponse)
+	if structured := strings.Join(collectStrings(in.ToolResponse), "\n"); len(structured) > len(text) {
+		text = structured
+	}
 
 	// A value resolved earlier this session reappearing in the output (in any
 	// encoding) is a leak — e.g. the model read back a file the hook resolved
