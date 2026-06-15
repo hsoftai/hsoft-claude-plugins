@@ -233,7 +233,7 @@ func runCwHost() {
 	opts := cowork.HostOpts{
 		Resolver: resolver,
 		Signer:   signer,
-		Enforce:  cfg.BrokerRefPolicy == "enforce",
+		Enforce:  cfg.CoworkRefPolicy == "enforce",
 		Auth: func(execID string) ([]byte, []string, bool) {
 			return lookupExec(session, execID)
 		},

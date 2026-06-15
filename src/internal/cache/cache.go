@@ -204,7 +204,7 @@ func roundtrip(session string, rq request, spawnIfDown bool) (response, bool) {
 
 // Detach configures cmd so a spawned child fully outlives the current process
 // (new session leader on Unix, new process group on Windows). Exported so other
-// daemons in this binary (e.g. the Cowork broker) can reuse the same mechanism.
+// daemons in this binary (e.g. the Cowork host daemon) can reuse the same mechanism.
 func Detach(cmd *exec.Cmd) { detach(cmd) }
 
 func spawnDaemon(session string) bool {

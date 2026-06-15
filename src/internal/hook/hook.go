@@ -81,15 +81,12 @@ type Config struct {
 	ToolOutputMode      string // redact | block | off
 	CommandReferences   string // inject | keep
 	VaultName           string // active vault: "keeper" | "1password" | "none"
-	// BrokerMode is true on a Cowork host using the legacy TCP broker: tools run in
-	// a VM, so the value must not be injected into the command (it would leak to the
-	// VM / the host transcript). References are kept literal; the value is delivered
-	// only via the broker fetch in the VM.
-	BrokerMode bool
-	// CoworkMode is true on a Cowork host using the sealed-box disk channel. Like
-	// BrokerMode, the value is never injected into the command; additionally the
-	// canonical `secrets-guard run --env-file` invocation is rewritten to `cw-run`
-	// with the per-command trust anchor (host public key) + one-time token (via fd).
+	// CoworkMode is true on a Cowork host: the agent's tools run in a VM, so the
+	// value is never injected into the command (it would leak to the VM / the host
+	// transcript). References are kept literal, and the canonical
+	// `secrets-guard run --env-file` invocation is rewritten to `cw-run` with the
+	// per-command trust anchor (host public key) + one-time token (via fd), which
+	// fetches the value over the sealed-box disk channel.
 	CoworkMode bool
 	// CoworkIsolate wraps the VM child in a user/pid/mount namespace (unshare).
 	CoworkIsolate bool
@@ -321,7 +318,7 @@ func (h *Handler) handlePreTool(in Input) Output {
 		seen.RecordPaths(in.SessionID, resolvedRefs)
 	}
 
-	// In broker mode the host does not resolve, so populate the broker's allowlist
+	// In Cowork mode the host does not resolve inline, so populate the Cowork allowlist
 	// with LEAST PRIVILEGE. The ONLY value channel into the VM is
 	// `secrets-guard run --env-file .env`, so the only thing that needs authorizing
 	// is a reference written as a `KEY=op://…` value into an env/dotenv file via the
@@ -331,7 +328,7 @@ func (h *Handler) handlePreTool(in Input) Output {
 	//   - arbitrary prose in a *.env file (only real KEY=ref lines count).
 	// This bounds what any rogue/curious VM process can pull to exactly the secrets
 	// the workflow declared in its env files.
-	if (h.cfg.BrokerMode || h.cfg.CoworkMode) && isEnvFileWrite(in.ToolName, in.ToolInput) {
+	if h.cfg.CoworkMode && isEnvFileWrite(in.ToolName, in.ToolInput) {
 		if refs := h.envFileRefs(in.ToolInput); len(refs) > 0 {
 			seen.RecordPaths(in.SessionID, refs)
 		}
@@ -345,7 +342,7 @@ func (h *Handler) handlePreTool(in Input) Output {
 	// 3) For Bash in redact mode, wrap the command so its output is redacted at
 	// the source (PostToolUse output rewriting is not honored by Claude Code).
 	wrapped := false
-	if in.ToolName == "Bash" && h.cfg.ToolOutputMode == "redact" && h.selfPath != "" && !h.cfg.BrokerMode && !h.cfg.CoworkMode {
+	if in.ToolName == "Bash" && h.cfg.ToolOutputMode == "redact" && h.selfPath != "" && !h.cfg.CoworkMode {
 		base := updated
 		if base == nil {
 			base = in.ToolInput
@@ -475,7 +472,7 @@ func (h *Handler) processBashCommand(cmd string) (newCmd string, refs []string, 
 		escaped, ref := sub[1] == `\`, sub[2]
 		refs = append(refs, ref)
 
-		if h.cfg.BrokerMode || h.cfg.CoworkMode {
+		if h.cfg.CoworkMode {
 			// Cowork: the tool runs in the VM. NEVER make the value shell-visible —
 			// any value placed in the VM shell (even via $(secrets-guard read …))
 			// can be redirected to the VM's disk (`… > .env`, heredoc, tee). Keep
@@ -593,7 +590,7 @@ func shellSingleQuote(s string) string {
 }
 
 // isEnvFileWrite reports whether a Write/Edit tool writes to an env/dotenv file —
-// the only file content from which the broker allowlist is populated. It is
+// the only file content from which the Cowork allowlist is populated. It is
 // restricted to file-content tools so a Bash command cannot pose as an env-file
 // write.
 func isEnvFileWrite(toolName string, toolInput json.RawMessage) bool {
@@ -626,7 +623,7 @@ func looksLikeEnvFile(path string) bool {
 
 // envFileRefs extracts vault references that appear as the VALUE of a `KEY=value`
 // line in the written content — never references in comments or prose — so only
-// real env entries authorize the broker allowlist.
+// real env entries authorize the Cowork allowlist.
 func (h *Handler) envFileRefs(toolInput json.RawMessage) []string {
 	var m map[string]any
 	if json.Unmarshal(toolInput, &m) != nil {

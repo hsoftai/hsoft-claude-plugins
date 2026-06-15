@@ -241,14 +241,14 @@ func TestPreToolUse_CommandReferencesKeep(t *testing.T) {
 	}
 }
 
-// CTF-2 regression: in broker mode the value must NEVER become shell-visible in
+// CTF-2 regression: in Cowork mode the value must NEVER become shell-visible in
 // the VM — no injection AND no `$(secrets-guard read …)` rewrite (which, inside a
 // heredoc/redirect, would land the value on the VM's disk). The reference is kept
 // literal; the command is not wrapped. The only value channel is `secrets-guard
 // run --env-file` (injects into the child env, never the shell or a file).
-func TestPreToolUse_BrokerModeKeepsReferenceLiteral(t *testing.T) {
+func TestPreToolUse_CoworkModeKeepsReferenceLiteral(t *testing.T) {
 	cfg := defaultCfg()
-	cfg.BrokerMode = true
+	cfg.CoworkMode = true
 	h := newHandler(cfg)
 	out := h.Handle(Input{
 		HookEventName: "PreToolUse",
@@ -262,19 +262,19 @@ func TestPreToolUse_BrokerModeKeepsReferenceLiteral(t *testing.T) {
 		}
 		_ = json.Unmarshal(out.HookSpecificOutput.UpdatedInput, &ti)
 		if strings.Contains(ti.Command, "secrets-guard read") {
-			t.Fatalf("broker mode must NOT rewrite to a shell-visible read (disk-leak): %q", ti.Command)
+			t.Fatalf("Cowork mode must NOT rewrite to a shell-visible read (disk-leak): %q", ti.Command)
 		}
 		if strings.Contains(ti.Command, "RESOLVED_SECRET") {
-			t.Fatalf("value must NOT be injected in broker mode: %q", ti.Command)
+			t.Fatalf("value must NOT be injected in Cowork mode: %q", ti.Command)
 		}
 	}
 }
 
-// In broker mode there is no Bash output wrap, so PostToolUse must block Bash
+// In Cowork mode there is no Bash output wrap, so PostToolUse must block Bash
 // output that leaks a known resolved value.
-func TestPostToolUse_BrokerModeBlocksBashLeak(t *testing.T) {
+func TestPostToolUse_CoworkModeBlocksBashLeak(t *testing.T) {
 	cfg := defaultCfg()
-	cfg.BrokerMode = true
+	cfg.CoworkMode = true
 	eng := detect.New()
 	// A resolver/cache that reports the value as known so the leak is detected.
 	h := NewHandler(cfg, eng, redact.New(eng), fakeResolver{value: "RESOLVED_SECRET"}, knownCache{}, "/opt/sg/bin/secrets-guard")
@@ -285,17 +285,17 @@ func TestPostToolUse_BrokerModeBlocksBashLeak(t *testing.T) {
 		ToolResponse:  json.RawMessage(`"the value is RESOLVED_SECRET oops"`),
 	})
 	if out.Decision != "block" {
-		t.Fatalf("broker-mode Bash leak must be blocked, got %+v", out)
+		t.Fatalf("Cowork-mode Bash leak must be blocked, got %+v", out)
 	}
 }
 
-// CTF-1 regression: in broker mode a reference that merely appears as text in an
-// arbitrary file (NOTES.md) must NOT be authorized into the broker allowlist
+// CTF-1 regression: in Cowork mode a reference that merely appears as text in an
+// arbitrary file (NOTES.md) must NOT be authorized into the Cowork allowlist
 // (confused-deputy exfiltration). Only executed Bash commands and env-file writes
 // authorize references.
-func TestPreToolUse_BrokerAllowlistLeastPrivilege(t *testing.T) {
+func TestPreToolUse_CoworkAllowlistLeastPrivilege(t *testing.T) {
 	cfg := defaultCfg()
-	cfg.BrokerMode = true
+	cfg.CoworkMode = true
 	sess := "ctf1-" + t.Name()
 
 	loaded := func() []string { return seen.LoadPaths(sess) }
@@ -387,17 +387,17 @@ func TestPreToolUse_WrapsBashOutputInRedactMode(t *testing.T) {
 	}
 }
 
-// CTF-12 verification: the broker-mode backstop works through the REAL seen
-// ledger (not the knownCache stub). On the host, the broker's OnResolve records
+// CTF-12 verification: the Cowork-mode backstop works through the REAL seen
+// ledger (not the knownCache stub). On the host, the host's OnResolve records
 // the resolved reference in seen; PostToolUse re-derives the value via the vault
 // (host has the CLI) and blocks the echoed value. noopCache forces the seen
 // fallback path.
-func TestPostToolUse_BrokerBackstopViaSeenLedger(t *testing.T) {
+func TestPostToolUse_CoworkBackstopViaSeenLedger(t *testing.T) {
 	cfg := defaultCfg()
-	cfg.BrokerMode = true
+	cfg.CoworkMode = true
 	h := newHandler(cfg) // fakeResolver resolves any ref to RESOLVED_SECRET; noopCache
 	sess := "ctf12-" + t.Name()
-	seen.RecordPaths(sess, []string{"op://Prod/db/password"}) // what the broker OnResolve records
+	seen.RecordPaths(sess, []string{"op://Prod/db/password"}) // what the host OnResolve records
 	defer seen.Clear(sess)
 
 	out := h.Handle(Input{

@@ -5,18 +5,15 @@ resolves vault references locally. In **Cowork**, commands run inside an isolate
 Linux VM that has **no `op`/`ksm`** and **no network path to the host** — the only
 host↔VM channel is the shared `outputs` disk mount. secrets-guard delivers secrets
 over that disk **safely**, using an asymmetric **sealed box** so a value never
-touches the VM's disk, shell, argv, env, or the model/transcript.
-
-This is the default Cowork mechanism (it needs no network). A legacy TCP broker
-(`internal/broker`, `execution_mode: broker`) remains for hosts that are explicitly
-network-reachable; see [security-broker.md](security-broker.md).
+touches the VM's disk, shell, argv, env, or the model/transcript. It needs **no
+network** — everything flows through the shared `outputs` directory.
 
 ## Detection (one plugin, both products)
 
 The host hook detects Cowork deterministically via **`CLAUDE_CODE_IS_COWORK=1`**
 (verified empirically; `CLAUDE_CODE_ENTRYPOINT` is `local-agent`, not `cowork`, so
 it is not used). Plain Claude Code → local behavior, unchanged. `execution_mode`
-(`auto`|`local`|`cowork`|`broker`) can force the mode.
+(`auto`|`local`|`cowork`) can force the mode.
 
 ## How it works
 
@@ -60,7 +57,7 @@ response off the spool is useless — there is no symmetric key to steal.
 | Spool reads (M1) | `O_NOFOLLOW` + regular-file check (no symlink/TOCTOU write-through) |
 | Anti-DoS (M2) | Caps on refs/request and served execs; idle timer reset **only** on genuine delivery |
 | Forgery resilience (M3) | A planted/forged response is ignored; `Fetch` keeps polling for the genuine one |
-| Containment | `broker_ref_policy=enforce` (default) + value-free audit |
+| Containment | `cowork_ref_policy=enforce` (default) + value-free audit |
 | Optional isolation | `cowork_isolate=true` → `unshare --user --map-root-user --pid --mount --fork --mount-proc` |
 
 The irreducible residual is that anything running in the VM *is* the agent: a
@@ -76,10 +73,10 @@ All optional — Cowork works with defaults:
 
 | Option | Default | Meaning |
 |---|---|---|
-| `execution_mode` | `auto` | `auto`/`local`/`cowork`/`broker` |
+| `execution_mode` | `auto` | `auto`/`local`/`cowork` |
 | `cowork_spool` | (auto) | Host spool path; auto-derived from `CLAUDE_PROJECT_DIR` |
 | `cowork_isolate` | `false` | Wrap the VM child in a user/pid/mount namespace |
-| `broker_ref_policy` | `enforce` | `enforce` resolves only host-approved refs; `audit` logs any |
+| `cowork_ref_policy` | `enforce` | `enforce` resolves only host-approved refs; `audit` logs any |
 
 ## Usage in the VM
 

@@ -130,15 +130,15 @@ References can embed the account so several accounts work at once:
 machine, set `op_account` (or `OP_ACCOUNT`), or just use the account-embedded
 reference `list_fields` returns.
 
-## Claude Cowork (host↔VM broker)
+## Claude Cowork (sealed-box disk channel)
 
-In Cowork, commands run in an isolated Linux VM with no vault CLI, while the hooks
-run on the host. secrets-guard resolves references **on the host** and delivers the
-values to the VM over an authenticated, pinned TLS broker — used **only in the VM's
-memory**, never on its disk, shell history, or the agent transcript. It is enabled
-by setting `cowork_spool` (and `execution_mode: broker`); plain Claude Code is
-unaffected. See [docs/cowork.md](docs/cowork.md) and the security review in
-[docs/security-broker.md](docs/security-broker.md).
+In Cowork, commands run in an isolated Linux VM with no vault CLI and no network to
+the host, while the hooks run on the host. secrets-guard resolves references **on
+the host** and delivers the values to the VM over the **only** host↔VM channel — the
+shared `outputs` disk — using an asymmetric **sealed box**, so the value lives
+**only in the child process's memory** and never touches the VM's disk, shell, argv,
+env, or the agent transcript. It is auto-detected (`CLAUDE_CODE_IS_COWORK`); plain
+Claude Code is unaffected. See [docs/cowork.md](docs/cowork.md).
 
 ## Install
 
@@ -168,11 +168,10 @@ or interactively with `/plugin configure secrets-guard@hsoft-claude-plugins`.
 | `custom_patterns_path` | – | JSON file of `{category, pattern}` |
 | `allowlist_path` | – | file of regexes (one per line) |
 | `audit_log_path` | – | path for value-free JSON-line audit log |
-| `execution_mode` | `auto` | `auto`, `local`, `broker` (Cowork) |
-| `cowork_spool` | – | host path of the Cowork `outputs` mount (enables the broker) |
-| `broker_host` | `172.16.10.1` | vmnet bridge IP the broker binds (Plan A) |
-| `broker_port` | `8771` | broker TCP port |
-| `broker_ref_policy` | `enforce` | `enforce` (host-observed refs only) or `audit` |
+| `execution_mode` | `auto` | `auto`, `local`, `cowork` |
+| `cowork_spool` | – | host path of the Cowork `outputs` mount (auto-derived from `CLAUDE_PROJECT_DIR`) |
+| `cowork_isolate` | `false` | wrap the VM child in a user/pid/mount namespace (`unshare`) |
+| `cowork_ref_policy` | `enforce` | `enforce` (host-approved refs only) or `audit` |
 
 ## Build from source
 

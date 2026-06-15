@@ -53,9 +53,6 @@ func main() {
 		case "cache-daemon":
 			_ = cache.RunDaemon(os.Getenv("SG_SESSION"))
 			return
-		case "broker":
-			runBroker()
-			return
 		case "cw-host":
 			runCwHost()
 			return
@@ -124,23 +121,13 @@ func runHook() {
 		if _, err := selfInstall("", true); err != nil {
 			fmt.Fprintln(os.Stderr, "secrets-guard: self-install:", err)
 		}
-		// Cowork: bring up the host-side secret daemon so the VM can resolve
-		// references (the VM has no vault CLI). The sealed-box disk channel
-		// (cw-host) is used when this is a detected Cowork host; the legacy TCP
-		// broker only where the host is explicitly network-reachable. No-op in
-		// plain Claude Code.
-		switch {
-		case cfg.IsCowork:
+		// Cowork: bring up the host-side secret daemon (cw-host) so the VM can
+		// resolve references over the sealed-box disk channel (the VM has no vault
+		// CLI). No-op in plain Claude Code.
+		if cfg.IsCowork {
 			spawnCwHost(cfg, in.SessionID)
-		case shouldRunBroker(cfg):
-			spawnBroker(cfg, in.SessionID)
 		}
 		return // no stdout → nothing injected into context
-	}
-
-	// On SessionEnd, remove the broker control-plane files from the spool.
-	if in.HookEventName == "SessionEnd" && shouldRunBroker(cfg) {
-		cleanupBroker(cfg, in.SessionID)
 	}
 
 	self, err := os.Executable()
@@ -427,10 +414,10 @@ func runRun() {
 		}
 	}
 
-	// Collect every reference across the env values, resolve them once (locally on
-	// the host / in Claude Code, or via the host broker inside the Cowork VM), then
-	// substitute the values back. Fail-closed: if resolution fails, the child does
-	// not start.
+	// Collect every reference across the env values, resolve them once with the
+	// local vault, then substitute the values back. Fail-closed: if resolution
+	// fails, the child does not start. (In the Cowork VM the host hook rewrites this
+	// invocation to `cw-run`, which fetches over the sealed-box disk channel.)
 	var allRefs []string
 	refsByKey := map[string][]string{}
 	for k, v := range env {
@@ -441,7 +428,7 @@ func runRun() {
 	}
 	var resolvedVals, resolvedRefs []string
 	if len(allRefs) > 0 {
-		values, rerr := resolveRefs(cfg, allRefs)
+		values, rerr := resolveRefsLocal(cfg, allRefs)
 		if rerr != nil {
 			fmt.Fprintln(os.Stderr, "secrets-guard run:", rerr)
 			os.Exit(1)
@@ -492,15 +479,15 @@ func runRead() {
 		os.Exit(2)
 	}
 	cfg := config.Load(os.Getenv)
-	// In the Cowork VM (broker mode) `read` would print the secret value to stdout,
-	// which the shell can redirect to the VM's disk. Refuse it: the only safe way to
-	// consume a secret in the VM is `secrets-guard run --env-file` (the value goes
-	// into the child process's environment, never the shell or a file).
-	if resolutionIsBroker(cfg) {
-		fmt.Fprintln(os.Stderr, "secrets-guard read no está disponible en la VM de Cowork (evita exponer el valor en el shell/disco). Usa: secrets-guard run --env-file .env -- <comando>")
+	// Without a local vault (e.g. the Cowork VM) `read` would print the secret value
+	// to stdout, which the shell can redirect to the VM's disk. Refuse it: the only
+	// safe way to consume a secret in the VM is `secrets-guard run --env-file` (the
+	// value goes into the child process's environment, never the shell or a file).
+	if !hasLocalVault(cfg) {
+		fmt.Fprintln(os.Stderr, "secrets-guard read no está disponible sin una bóveda local (p. ej. en la VM de Cowork). Usa: secrets-guard run --env-file .env -- <comando>")
 		os.Exit(2)
 	}
-	values, err := resolveRefs(cfg, refs)
+	values, err := resolveRefsLocal(cfg, refs)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "secrets-guard read:", err)
 		os.Exit(1)
@@ -628,9 +615,8 @@ func toHookConfig(c config.Config, vaultName string) hook.Config {
 		ToolOutputMode:      c.ToolOutputMode,
 		CommandReferences:   c.CommandReferences,
 		VaultName:           vaultName,
-		// Cowork (sealed-box disk channel) takes precedence; the legacy TCP broker
-		// only applies where the host is explicitly network-reachable and not Cowork.
-		BrokerMode:    shouldRunBroker(c) && !c.IsCowork,
+		// Cowork uses the sealed-box disk channel: keep references literal and rewrite
+		// the canonical `secrets-guard run` into `cw-run`.
 		CoworkMode:    c.IsCowork,
 		CoworkIsolate: c.CoworkIsolate,
 	}

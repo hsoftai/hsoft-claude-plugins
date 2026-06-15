@@ -90,7 +90,8 @@ literal — write the reference, escaping with `\` if needed.
 
 If you are in Cowork, your Bash commands run in an isolated VM that has no vault
 CLI. The host resolves references and delivers values to the VM over a secure
-broker, used **only in process memory**. Two rules in Cowork:
+sealed-box channel on the shared disk, used **only in process memory**. Two rules
+in Cowork:
 
 1. **Consume secrets only via `secrets-guard run --env-file .env -- <cmd>`.** Write
    the `.env` with the **Write tool** (it keeps the reference, e.g.

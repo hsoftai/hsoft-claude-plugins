@@ -1,7 +1,7 @@
 {
   "name": "secrets-guard",
   "displayName": "secrets-guard",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Keep secrets out of the model: block plaintext secrets in prompts, resolve vault references (Keeper/1Password) into tool input, and redact secrets leaked in tool output.",
   "author": {
     "name": "Humphrey Consulting Group"
@@ -73,7 +73,7 @@
     "execution_mode": {
       "type": "string",
       "title": "Execution mode",
-      "description": "Where secret resolution happens: 'auto' (detect — Cowork host uses the sealed-box disk channel, plain Claude Code resolves locally), 'local' (always resolve on this host), 'cowork' (force the Cowork host daemon + sealed-box disk channel), or 'broker' (legacy TCP broker where the host is network-reachable). Cowork is detected automatically via CLAUDE_CODE_IS_COWORK.",
+      "description": "Where secret resolution happens: 'auto' (detect — Cowork host uses the sealed-box disk channel, plain Claude Code resolves locally), 'local' (always resolve on this host), or 'cowork' (force the Cowork host daemon + sealed-box disk channel). Cowork is detected automatically via CLAUDE_CODE_IS_COWORK.",
       "default": "auto"
     },
     "cowork_spool": {
@@ -88,22 +88,10 @@
       "description": "When true, wrap the VM child in an unprivileged user/pid/mount namespace (unshare) so other VM processes cannot inspect its /proc. Defense-in-depth on top of the never-transmitted private key; off by default because it changes the child's process view.",
       "default": false
     },
-    "broker_host": {
+    "cowork_ref_policy": {
       "type": "string",
-      "title": "Broker bind IP",
-      "description": "The vmnet bridge IP the host broker binds and advertises (Plan A). Refuses to bind all interfaces (0.0.0.0).",
-      "default": "172.16.10.1"
-    },
-    "broker_port": {
-      "type": "string",
-      "title": "Broker port",
-      "description": "TCP port for the Cowork broker.",
-      "default": "8771"
-    },
-    "broker_ref_policy": {
-      "type": "string",
-      "title": "Broker reference policy",
-      "description": "'enforce' (default) resolves only references the host observed in tool inputs this session; 'audit' resolves any requested reference and logs it (less safe — opt-in).",
+      "title": "Cowork reference policy",
+      "description": "'enforce' (default) resolves only references the host approved for the command this session; 'audit' resolves any requested reference and logs it (less safe — opt-in).",
       "default": "enforce"
     }
   }

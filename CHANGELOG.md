@@ -6,6 +6,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-06-15
+
+### Removed
+- **Removed the legacy TCP broker** (`internal/broker`) and its options
+  (`broker_host`, `broker_port`, `execution_mode: broker`). It required host↔VM
+  network reachability that does not exist in Cowork; the sealed-box disk channel
+  (0.3.0) fully replaces it. `broker_ref_policy` is renamed `cowork_ref_policy`.
+
+## [0.3.0] - 2026-06-15
+
+### Added
+- **Claude Cowork support via an asymmetric sealed-box disk channel.** In Cowork the
+  agent's commands run in an isolated Linux VM with no vault CLI **and no network to
+  the host** — the only host↔VM channel is the shared `outputs` disk. secrets-guard
+  resolves references **on the host** (`cw-host` daemon) and delivers each value over
+  that disk **sealed** to an ephemeral X25519 key the VM (`cw-run`) generates in RAM
+  and never transmits, so a captured request+response is useless. The host signs the
+  whole response envelope (Ed25519); the trust anchor (host public key) is delivered
+  to the VM via the command **environment** (authoritative over agent argv), and a
+  one-time token is delivered on a **file descriptor** (never argv/env/disk), binding
+  the request to the VM's key. Reads use `O_NOFOLLOW`; per-exec allowlist (`enforce`)
+  bounds what each command can fetch; optional `cowork_isolate` wraps the VM child in
+  a namespace. Detection is automatic via `CLAUDE_CODE_IS_COWORK`. New options:
+  `execution_mode` (`auto`/`local`/`cowork`), `cowork_spool` (auto-derived from
+  `CLAUDE_PROJECT_DIR`), `cowork_isolate`, `cowork_ref_policy`. Adversarial-reviewed
+  (no Critical/High). Plain Claude Code is unchanged. See `docs/cowork.md`.
+
 ## [0.2.0] - 2026-06-14
 
 ### Added
@@ -24,7 +51,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is materialized only at exec time in the VM. New options: `execution_mode`
   (`auto`/`local`/`broker`), `cowork_spool`, `broker_host`, `broker_port`,
   `broker_ref_policy` (`enforce` default / `audit`). Plain Claude Code is
-  unchanged. Security model and pentest: `docs/security-broker.md`; setup and
+  unchanged. Security model and pentest: `docs/cowork.md`; setup and
   manual test: `docs/cowork.md`.
 - **Three capture-the-flag rounds hardened the broker further.** (1) The allowlist
   no longer over-populates from passive text in any tool input (confused deputy).
@@ -33,7 +60,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   can't write the value to the VM disk; the only value channel is `secrets-guard
   run --env-file` (injects into the child env). (3) Only real `KEY=op://…` lines in
   an env file written through the Write/Edit tool authorize a reference — a bare
-  `echo` or prose no longer mints an allowlist entry. See `docs/security-broker.md`.
+  `echo` or prose no longer mints an allowlist entry. See `docs/cowork.md`.
 - **Security hardening of the broker (pentest-driven).** Mandatory TLS pinning,
   32-byte minimum capability token, default `enforce` reference allowlist (the host
   authorizes only references it observed this session), per-start token rotation +
