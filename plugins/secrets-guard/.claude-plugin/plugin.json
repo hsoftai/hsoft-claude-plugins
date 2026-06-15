@@ -1,7 +1,7 @@
 {
   "name": "secrets-guard",
   "displayName": "secrets-guard",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Keep secrets out of the model: block plaintext secrets in prompts, resolve vault references (Keeper/1Password) into tool input, and redact secrets leaked in tool output.",
   "author": {
     "name": "Humphrey Consulting Group"
@@ -73,14 +73,20 @@
     "execution_mode": {
       "type": "string",
       "title": "Execution mode",
-      "description": "Where secret resolution happens: 'auto' (local vault if present, else the Cowork broker), 'local' (always resolve on this host, Claude Code), or 'broker' (Cowork: host resolves, VM consumes over the network).",
+      "description": "Where secret resolution happens: 'auto' (detect — Cowork host uses the sealed-box disk channel, plain Claude Code resolves locally), 'local' (always resolve on this host), 'cowork' (force the Cowork host daemon + sealed-box disk channel), or 'broker' (legacy TCP broker where the host is network-reachable). Cowork is detected automatically via CLAUDE_CODE_IS_COWORK.",
       "default": "auto"
     },
     "cowork_spool": {
       "type": "string",
       "title": "Cowork spool path",
-      "description": "Host path of the shared Cowork 'outputs' mount. Required to enable the broker; the host writes the control-plane bootstrap here (never a secret value).",
+      "description": "Host path of the shared Cowork 'outputs' mount. Auto-derived from CLAUDE_PROJECT_DIR; set only to override. The host writes the sealed control-plane here (public keys + ciphertext, never a secret value).",
       "default": ""
+    },
+    "cowork_isolate": {
+      "type": "boolean",
+      "title": "Cowork VM isolation",
+      "description": "When true, wrap the VM child in an unprivileged user/pid/mount namespace (unshare) so other VM processes cannot inspect its /proc. Defense-in-depth on top of the never-transmitted private key; off by default because it changes the child's process view.",
+      "default": false
     },
     "broker_host": {
       "type": "string",

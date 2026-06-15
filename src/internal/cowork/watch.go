@@ -1,8 +1,10 @@
 package cowork
 
 import (
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,15 +53,46 @@ func NewHost() (*HostSigner, []byte, error) {
 	return s, s.pub, nil
 }
 
+// NewHostFromSeed reconstructs the host signing identity from a persisted 32-byte
+// Ed25519 seed, so the daemon (which signs) and the hook (which embeds the public
+// anchor in the command) share ONE identity across processes.
+func NewHostFromSeed(seed []byte) (*HostSigner, []byte, error) {
+	if len(seed) != ed25519.SeedSize {
+		return nil, nil, fmt.Errorf("bad host seed length %d", len(seed))
+	}
+	priv := ed25519.NewKeyFromSeed(seed)
+	pub := priv.Public().(ed25519.PublicKey)
+	return &hostSigner{priv: priv, pub: pub}, pub, nil
+}
+
+// Seed returns the 32-byte Ed25519 seed for persistence (host-only storage).
+func (h *hostSigner) Seed() []byte { return h.priv.Seed() }
+
+// Public returns the host's Ed25519 public key.
+func (h *hostSigner) Public() ed25519.PublicKey { return h.pub }
+
+// maxServedExecs bounds the done set so a flood of distinct exec ids cannot grow
+// host memory without limit (M2). Reaching it stops the daemon (a fresh session
+// gets a fresh daemon); far above any real session's command count.
+const maxServedExecs = 4096
+
 // Watch runs the host-side daemon loop: it polls one spool directory for incoming
 // request files and answers each exactly once. Returns when stop is closed or the
 // idle timeout elapses. The plaintext value lives only in this process's memory.
+//
+// The idle timer is reset ONLY when a genuine value is delivered (M2): rejected
+// probes (bad auth, unapproved refs, malformed) do NOT keep the daemon alive, so a
+// rogue VM process cannot hold the host's vault unlocked by spamming junk requests.
 func Watch(spool string, o HostOpts, idle time.Duration, stop <-chan struct{}) error {
 	if err := ensureDir(spool); err != nil {
 		return err
 	}
 	if o.Signer != nil {
-		_ = PublishHostKey(spool, o.Signer.pub)
+		if err := PublishHostKey(spool, o.Signer.pub); err != nil {
+			// Informational only (the anchor is the command line). A mismatch is a
+			// tamper signal worth surfacing, but never fatal.
+			fmt.Fprintln(os.Stderr, "secrets-guard cw-host:", err)
+		}
 	}
 	done := map[string]bool{}
 	deadline := time.Now().Add(idle)
@@ -76,8 +109,15 @@ func Watch(spool string, o HostOpts, idle time.Duration, stop <-chan struct{}) e
 				continue
 			}
 			execID := strings.TrimSuffix(strings.TrimPrefix(base, "req-"), ".json")
-			if serveRequest(spool, execID, o) == nil {
-				done[base] = true
+			delivered, err := serveRequest(spool, execID, o)
+			if err != nil {
+				continue // not yet readable / transient — retry next tick
+			}
+			done[base] = true // a response (ok or error) was written; never re-answer
+			if len(done) >= maxServedExecs {
+				return nil
+			}
+			if delivered {
 				deadline = time.Now().Add(idle)
 			}
 		}

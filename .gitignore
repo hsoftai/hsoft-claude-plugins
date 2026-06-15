@@ -19,3 +19,6 @@ coverage.*
 
 # diagnostic env dumps (SG_DEBUG_ENV) — never commit
 secrets-guard-envprobe-*.json
+
+# stray local build output
+src/secrets-guard

@@ -21,13 +21,21 @@ type Config struct {
 	AllowlistPath       string
 	AuditLogPath        string
 
-	// Broker mode (Cowork): resolution happens on the host and resolved values
-	// are delivered to the VM over a network broker, used only in memory.
-	ExecutionMode   string // auto | local | broker
-	CoworkSpool     string // path to the shared `outputs` mount (host or VM side)
+	// Cowork mode: the agent's commands run in an isolated VM with no vault CLI.
+	// Resolution happens on the host and values are delivered to the VM either over
+	// the sealed-box disk channel (default, internal/cowork) or — where the host is
+	// network-reachable — the TCP broker (internal/broker).
+	ExecutionMode   string // auto | local | cowork | broker
+	CoworkSpool     string // host-side path of the shared `outputs` mount (= CLAUDE_PROJECT_DIR)
+	CoworkIsolate   bool   // wrap the VM child in a user/pid/mount namespace (unshare)
 	BrokerHost      string // IP the host broker binds/advertises on the vmnet bridge
 	BrokerPort      int    // TCP port for the broker (0 = default 8771)
 	BrokerRefPolicy string // enforce (default) | audit — allowlist refs the host observed
+
+	// IsCowork is the resolved detection: true when this process is the Cowork host
+	// hook (the agent's commands run in the VM). Deterministic via
+	// CLAUDE_CODE_IS_COWORK; an explicit execution_mode of cowork/local overrides it.
+	IsCowork bool
 }
 
 // DefaultBrokerPort is used when broker_port is unset.
@@ -61,11 +69,29 @@ func Load(env Getenv) Config {
 	c.AllowlistPath = env(prefix + "ALLOWLIST_PATH")
 	c.AuditLogPath = env(prefix + "AUDIT_LOG_PATH")
 
-	c.ExecutionMode = oneOf(env(prefix+"EXECUTION_MODE"), c.ExecutionMode, "auto", "local", "broker")
-	c.CoworkSpool = env(prefix + "COWORK_SPOOL")
+	c.ExecutionMode = oneOf(env(prefix+"EXECUTION_MODE"), c.ExecutionMode, "auto", "local", "cowork", "broker")
+	c.CoworkSpool = strings.TrimSpace(env(prefix + "COWORK_SPOOL"))
+	c.CoworkIsolate = boolOr(env(prefix+"COWORK_ISOLATE"), false)
 	c.BrokerHost = env(prefix + "BROKER_HOST")
 	c.BrokerPort = intOr(env(prefix+"BROKER_PORT"), c.BrokerPort)
 	c.BrokerRefPolicy = oneOf(env(prefix+"BROKER_REF_POLICY"), c.BrokerRefPolicy, "audit", "enforce")
+
+	// Detect the Cowork host hook (the agent's commands run in the VM). The detector
+	// is deterministic — Claude Code sets CLAUDE_CODE_IS_COWORK=1 in the host hook's
+	// environment (verified empirically; CLAUDE_CODE_ENTRYPOINT is "local-agent",
+	// NOT "cowork", so it must not be used). An explicit execution_mode overrides.
+	c.IsCowork = env("CLAUDE_CODE_IS_COWORK") == "1"
+	switch c.ExecutionMode {
+	case "cowork":
+		c.IsCowork = true
+	case "local":
+		c.IsCowork = false
+	}
+	// The host spool is exactly CLAUDE_PROJECT_DIR in Cowork (the host view of the
+	// shared `outputs` mount); auto-derive it so no manual config is needed.
+	if c.CoworkSpool == "" {
+		c.CoworkSpool = strings.TrimSpace(env("CLAUDE_PROJECT_DIR"))
+	}
 	return c
 }
 

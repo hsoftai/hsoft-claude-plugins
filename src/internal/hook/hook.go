@@ -81,10 +81,27 @@ type Config struct {
 	ToolOutputMode      string // redact | block | off
 	CommandReferences   string // inject | keep
 	VaultName           string // active vault: "keeper" | "1password" | "none"
-	// BrokerMode is true on a Cowork host: tools run in a VM, so the value must
-	// not be injected into the command (it would leak to the VM / the host
-	// transcript). References are rewritten to a runtime broker fetch in the VM.
+	// BrokerMode is true on a Cowork host using the legacy TCP broker: tools run in
+	// a VM, so the value must not be injected into the command (it would leak to the
+	// VM / the host transcript). References are kept literal; the value is delivered
+	// only via the broker fetch in the VM.
 	BrokerMode bool
+	// CoworkMode is true on a Cowork host using the sealed-box disk channel. Like
+	// BrokerMode, the value is never injected into the command; additionally the
+	// canonical `secrets-guard run --env-file` invocation is rewritten to `cw-run`
+	// with the per-command trust anchor (host public key) + one-time token (via fd).
+	CoworkMode bool
+	// CoworkIsolate wraps the VM child in a user/pid/mount namespace (unshare).
+	CoworkIsolate bool
+}
+
+// CoworkAnchor mints, per command, the trust anchor for a fetch that will run in
+// the Cowork VM: an exec id, the host Ed25519 public key (base64, delivered on the
+// command line) and a one-time token (delivered to the VM over a file descriptor).
+// The implementation persists {exec id -> token, allowed refs} in a HOST-ONLY
+// directory the daemon reads. ok=false when Cowork host state is unavailable.
+type CoworkAnchor interface {
+	Mint(session string, allowedRefs []string) (execID, hostPubB64, tokenB64 string, ok bool)
 }
 
 // Decision is a structured audit record produced by Handle (no secret values).
@@ -103,10 +120,15 @@ type Handler struct {
 	vault    Resolver
 	cache    SecretCache
 	selfPath string // absolute path to this binary, used for Bash output wrapping
+	anchor   CoworkAnchor // mints the per-command Cowork trust anchor (nil outside Cowork)
 
 	// Last holds the audit record of the most recent Handle call.
 	Last Decision
 }
+
+// SetCoworkAnchor installs the Cowork anchor minter (host side). Without it, the
+// Cowork command rewrite falls back to keeping references literal.
+func (h *Handler) SetCoworkAnchor(a CoworkAnchor) { h.anchor = a }
 
 // NewHandler builds a Handler. selfPath is the absolute path to the
 // secrets-guard binary; it is used to wrap Bash commands so their output is
@@ -255,6 +277,22 @@ func (h *Handler) handlePreTool(in Input) Output {
 		var m map[string]any
 		if json.Unmarshal(in.ToolInput, &m) == nil {
 			if cmd, ok := m["command"].(string); ok && cmd != "" {
+				// Cowork: rewrite the canonical `secrets-guard run --env-file …`
+				// invocation into `cw-run` carrying the per-command trust anchor
+				// (host public key) and a one-time token (delivered via fd). The
+				// secret is fetched into the child's memory in the VM — never the
+				// shell, disk, argv or env.
+				if h.cfg.CoworkMode {
+					if rewritten, ok := h.coworkRewriteRun(cmd, in.SessionID); ok {
+						m["command"] = rewritten
+						if b, e := json.Marshal(m); e == nil {
+							h.Last = Decision{Event: "PreToolUse", Action: "cowork-run"}
+							return Output{HookSpecificOutput: &HookSpecificOutput{
+								HookEventName: "PreToolUse", UpdatedInput: b,
+							}}
+						}
+					}
+				}
 				newCmd, refs, vals, injErr := h.processBashCommand(cmd)
 				if injErr != nil {
 					h.Last = Decision{Event: "PreToolUse", Action: "deny", Count: 0}
@@ -293,7 +331,7 @@ func (h *Handler) handlePreTool(in Input) Output {
 	//   - arbitrary prose in a *.env file (only real KEY=ref lines count).
 	// This bounds what any rogue/curious VM process can pull to exactly the secrets
 	// the workflow declared in its env files.
-	if h.cfg.BrokerMode && isEnvFileWrite(in.ToolName, in.ToolInput) {
+	if (h.cfg.BrokerMode || h.cfg.CoworkMode) && isEnvFileWrite(in.ToolName, in.ToolInput) {
 		if refs := h.envFileRefs(in.ToolInput); len(refs) > 0 {
 			seen.RecordPaths(in.SessionID, refs)
 		}
@@ -307,7 +345,7 @@ func (h *Handler) handlePreTool(in Input) Output {
 	// 3) For Bash in redact mode, wrap the command so its output is redacted at
 	// the source (PostToolUse output rewriting is not honored by Claude Code).
 	wrapped := false
-	if in.ToolName == "Bash" && h.cfg.ToolOutputMode == "redact" && h.selfPath != "" && !h.cfg.BrokerMode {
+	if in.ToolName == "Bash" && h.cfg.ToolOutputMode == "redact" && h.selfPath != "" && !h.cfg.BrokerMode && !h.cfg.CoworkMode {
 		base := updated
 		if base == nil {
 			base = in.ToolInput
@@ -437,14 +475,14 @@ func (h *Handler) processBashCommand(cmd string) (newCmd string, refs []string, 
 		escaped, ref := sub[1] == `\`, sub[2]
 		refs = append(refs, ref)
 
-		if h.cfg.BrokerMode {
+		if h.cfg.BrokerMode || h.cfg.CoworkMode {
 			// Cowork: the tool runs in the VM. NEVER make the value shell-visible —
 			// any value placed in the VM shell (even via $(secrets-guard read …))
 			// can be redirected to the VM's disk (`… > .env`, heredoc, tee). Keep
 			// EVERY reference literal; the value is delivered only through
-			// `secrets-guard run --env-file`, which injects it into the child
-			// process's environment (memory), never into the shell or a file. The
-			// reference is recorded (by the caller) into the broker allowlist.
+			// `secrets-guard run --env-file` (rewritten to `cw-run`), which injects
+			// it into the child process's environment (memory), never into the shell
+			// or a file. The reference is recorded (by the caller) into the allowlist.
 			return ref
 		}
 
@@ -464,6 +502,62 @@ func (h *Handler) processBashCommand(cmd string) (newCmd string, refs []string, 
 		return resolved
 	})
 	return out, refs, vals, injectErr
+}
+
+// coworkRewriteRun rewrites a single, simple `secrets-guard run --env-file … -- CMD`
+// invocation (the canonical Cowork value-delivery pattern) into a `cw-run` command
+// that carries the per-command trust anchor (host public key) on its argv and a
+// one-time token on fd 3. It fires ONLY for a lone simple invocation: if the command
+// chains other statements or uses shell operators / redirections / substitutions,
+// it is left untouched (references stay literal — the value is simply not delivered
+// inline; the agent should use the canonical pattern in Cowork). Returns ok=false
+// to fall back to the literal-reference behavior.
+func (h *Handler) coworkRewriteRun(cmd, session string) (string, bool) {
+	if h.anchor == nil {
+		return "", false
+	}
+	t := strings.TrimSpace(cmd)
+	if t != "secrets-guard run" && !strings.HasPrefix(t, "secrets-guard run ") {
+		return "", false
+	}
+	// Single simple invocation only: no chaining / redirection / command
+	// substitution that could let an appended fd redirect attach to another
+	// statement or otherwise surface the token.
+	if strings.ContainsAny(t, ";\n|&`<>") || strings.Contains(t, "$(") {
+		return "", false
+	}
+	allowed := seen.LoadPaths(session)
+	execID, hostPubB64, tokenB64, ok := h.anchor.Mint(session, allowed)
+	if !ok {
+		return "", false
+	}
+	args := strings.TrimSpace(strings.TrimPrefix(t, "secrets-guard run"))
+	var b strings.Builder
+	// The NON-SECRET anchor (host public key, exec id, auth fd) is passed via the
+	// ENVIRONMENT of the command, NOT argv. This is critical: the agent controls the
+	// `args` appended after `cw-run`, and a flag parser is last-wins, so anchor flags
+	// on argv could be overridden by an injected `--host-pub <attacker>`. An
+	// environment assignment in the command prefix cannot be overridden by later
+	// arguments, so cw-run reads the authoritative anchor from env. The host public
+	// key and exec id are non-secret; the one-time TOKEN stays on fd 3 only.
+	b.WriteString("SG_CW_HOSTPUB=")
+	b.WriteString(shellSingleQuote(hostPubB64))
+	b.WriteString(" SG_CW_EXECID=")
+	b.WriteString(shellSingleQuote(execID))
+	b.WriteString(" SG_CW_AUTHFD=3")
+	if h.cfg.CoworkIsolate {
+		b.WriteString(" SG_CW_ISOLATE=1")
+	}
+	b.WriteString(" secrets-guard cw-run")
+	if args != "" {
+		b.WriteString(" ")
+		b.WriteString(args)
+	}
+	// One-time token on fd 3 via a here-string — never argv/env. Because the whole
+	// command is a single simple invocation, the redirect scopes exactly to it.
+	b.WriteString(" 3<<<")
+	b.WriteString(shellSingleQuote(tokenB64))
+	return b.String(), true
 }
 
 func wrapBashCommand(toolInput json.RawMessage, selfPath, session string) (json.RawMessage, bool) {

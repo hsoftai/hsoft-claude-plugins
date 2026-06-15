@@ -56,6 +56,12 @@ func main() {
 		case "broker":
 			runBroker()
 			return
+		case "cw-host":
+			runCwHost()
+			return
+		case "cw-run":
+			runCwRun()
+			return
 		case "run":
 			runRun()
 			return
@@ -118,9 +124,15 @@ func runHook() {
 		if _, err := selfInstall("", true); err != nil {
 			fmt.Fprintln(os.Stderr, "secrets-guard: self-install:", err)
 		}
-		// Cowork: bring up the host broker so the VM can resolve references over
-		// the network (the VM has no vault CLI). No-op in plain Claude Code.
-		if shouldRunBroker(cfg) {
+		// Cowork: bring up the host-side secret daemon so the VM can resolve
+		// references (the VM has no vault CLI). The sealed-box disk channel
+		// (cw-host) is used when this is a detected Cowork host; the legacy TCP
+		// broker only where the host is explicitly network-reachable. No-op in
+		// plain Claude Code.
+		switch {
+		case cfg.IsCowork:
+			spawnCwHost(cfg, in.SessionID)
+		case shouldRunBroker(cfg):
 			spawnBroker(cfg, in.SessionID)
 		}
 		return // no stdout → nothing injected into context
@@ -135,7 +147,10 @@ func runHook() {
 	if err != nil {
 		self = ""
 	}
-	h := hook.NewHandler(toHookConfig(cfg, resolver.ProviderName(), shouldRunBroker(cfg)), eng, red, resolver, cache.New(), self)
+	h := hook.NewHandler(toHookConfig(cfg, resolver.ProviderName()), eng, red, resolver, cache.New(), self)
+	if cfg.IsCowork {
+		h.SetCoworkAnchor(coworkAnchor{})
+	}
 	out := h.Handle(in)
 
 	audit.New(cfg.AuditLogPath).Log(audit.Record{
@@ -606,13 +621,17 @@ func readInput(r io.Reader) (hook.Input, error) {
 	return in, err
 }
 
-func toHookConfig(c config.Config, vaultName string, brokerMode bool) hook.Config {
+func toHookConfig(c config.Config, vaultName string) hook.Config {
 	return hook.Config{
 		BlockOnPromptSecret: c.BlockOnPromptSecret,
 		ToolInputPolicy:     c.ToolInputPolicy,
 		ToolOutputMode:      c.ToolOutputMode,
 		CommandReferences:   c.CommandReferences,
 		VaultName:           vaultName,
-		BrokerMode:          brokerMode,
+		// Cowork (sealed-box disk channel) takes precedence; the legacy TCP broker
+		// only applies where the host is explicitly network-reachable and not Cowork.
+		BrokerMode:    shouldRunBroker(c) && !c.IsCowork,
+		CoworkMode:    c.IsCowork,
+		CoworkIsolate: c.CoworkIsolate,
 	}
 }

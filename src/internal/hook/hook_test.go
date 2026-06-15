@@ -509,3 +509,85 @@ func TestPostToolUse_OffMode(t *testing.T) {
 		t.Fatalf("off mode must not block, got %+v", out)
 	}
 }
+
+// --- Cowork (sealed-box disk channel) ---
+
+type fakeAnchor struct{}
+
+func (fakeAnchor) Mint(string, []string) (string, string, string, bool) {
+	return "execID123", "SG9zdFB1Yg==", "dG9rZW4=", true
+}
+
+// The canonical `secrets-guard run --env-file … -- CMD` is rewritten to cw-run with
+// the host public key on argv and the one-time token on fd 3 — never the value.
+func TestPreToolUse_CoworkRewritesRun(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.CoworkMode = true
+	h := newHandler(cfg)
+	h.SetCoworkAnchor(fakeAnchor{})
+	out := h.Handle(Input{
+		HookEventName: "PreToolUse", ToolName: "Bash", SessionID: "s1",
+		ToolInput: json.RawMessage(`{"command":"secrets-guard run --env-file .env -- npm start"}`),
+	})
+	if out.HookSpecificOutput == nil || out.HookSpecificOutput.UpdatedInput == nil {
+		t.Fatalf("expected cowork rewrite, got %+v", out)
+	}
+	var m map[string]any
+	_ = json.Unmarshal(out.HookSpecificOutput.UpdatedInput, &m)
+	cmd, _ := m["command"].(string)
+	for _, want := range []string{
+		"SG_CW_HOSTPUB='SG9zdFB1Yg=='", "SG_CW_EXECID='execID123'", "SG_CW_AUTHFD=3",
+		"secrets-guard cw-run", "--env-file .env -- npm start", "3<<<'dG9rZW4='",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Fatalf("rewritten command missing %q:\n%s", want, cmd)
+		}
+	}
+	// The anchor must NOT be on argv: appended agent args could otherwise override
+	// a `--host-pub`/`--auth-fd` flag (last-wins). It belongs in the env prefix.
+	if strings.Contains(cmd, "--host-pub") || strings.Contains(cmd, "--auth-fd") {
+		t.Fatalf("anchor must be in the env prefix, not argv: %s", cmd)
+	}
+	if strings.Contains(cmd, "RESOLVED_SECRET") {
+		t.Fatalf("the value must NEVER appear in the command: %s", cmd)
+	}
+}
+
+// A bare command carrying a reference keeps it literal and never injects the value.
+func TestPreToolUse_CoworkKeepsRefLiteral(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.CoworkMode = true
+	h := newHandler(cfg)
+	h.SetCoworkAnchor(fakeAnchor{})
+	out := h.Handle(Input{
+		HookEventName: "PreToolUse", ToolName: "Bash", SessionID: "s1",
+		ToolInput: json.RawMessage(`{"command":"echo op://v/i/p"}`),
+	})
+	if out.HookSpecificOutput != nil && out.HookSpecificOutput.UpdatedInput != nil {
+		var m map[string]any
+		_ = json.Unmarshal(out.HookSpecificOutput.UpdatedInput, &m)
+		if cmd, _ := m["command"].(string); strings.Contains(cmd, "RESOLVED_SECRET") {
+			t.Fatalf("value leaked into a bare command: %s", cmd)
+		}
+	}
+}
+
+// A compound command (redirection/chaining) is NOT rewritten — the fd redirect must
+// not attach to another statement; refs stay literal.
+func TestPreToolUse_CoworkDoesNotRewriteCompound(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.CoworkMode = true
+	h := newHandler(cfg)
+	h.SetCoworkAnchor(fakeAnchor{})
+	out := h.Handle(Input{
+		HookEventName: "PreToolUse", ToolName: "Bash", SessionID: "s1",
+		ToolInput: json.RawMessage(`{"command":"secrets-guard run --env-file .env -- npm start > out.txt"}`),
+	})
+	if out.HookSpecificOutput != nil && out.HookSpecificOutput.UpdatedInput != nil {
+		var m map[string]any
+		_ = json.Unmarshal(out.HookSpecificOutput.UpdatedInput, &m)
+		if cmd, _ := m["command"].(string); strings.Contains(cmd, "cw-run") {
+			t.Fatalf("compound command must not be rewritten: %s", cmd)
+		}
+	}
+}
