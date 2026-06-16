@@ -45,6 +45,40 @@ func TestLoad_FromEnv(t *testing.T) {
 	}
 }
 
+func TestLoad_KernelDLP(t *testing.T) {
+	// Default.
+	c := Load(func(string) string { return "" })
+	if c.KernelDLP != "auto" {
+		t.Errorf("KernelDLP default = %q, want auto", c.KernelDLP)
+	}
+	// Valid override.
+	c = Load(func(k string) string {
+		if k == "CLAUDE_PLUGIN_OPTION_KERNEL_DLP" {
+			return "require"
+		}
+		if k == "CLAUDE_PLUGIN_OPTION_DLP_INSTALL_SOURCE" {
+			return "https://mirror.internal/sandbox-dlp"
+		}
+		return ""
+	})
+	if c.KernelDLP != "require" {
+		t.Errorf("KernelDLP = %q, want require", c.KernelDLP)
+	}
+	if c.DLPInstallSource != "https://mirror.internal/sandbox-dlp" {
+		t.Errorf("DLPInstallSource = %q", c.DLPInstallSource)
+	}
+	// Invalid enum falls back to default.
+	c = Load(func(k string) string {
+		if k == "CLAUDE_PLUGIN_OPTION_KERNEL_DLP" {
+			return "bogus"
+		}
+		return ""
+	})
+	if c.KernelDLP != "auto" {
+		t.Errorf("invalid KernelDLP should fall back to auto, got %q", c.KernelDLP)
+	}
+}
+
 func TestLoad_InvalidEnumFallsBackToDefault(t *testing.T) {
 	c := Load(func(k string) string {
 		if k == "CLAUDE_PLUGIN_OPTION_TOOL_OUTPUT_MODE" {

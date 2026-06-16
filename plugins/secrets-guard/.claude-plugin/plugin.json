@@ -111,6 +111,18 @@
       "title": "Extra shell tool names",
       "description": "Comma-separated extra tool names to treat as shell command execution (wrap + redact), beyond the built-in 'Bash' and the MCP shell pattern (any name ending in '__bash'/'__shell', e.g. Cowork's mcp__workspace__bash). Use only if a host exposes a shell under a name the pattern doesn't catch.",
       "default": ""
+    },
+    "kernel_dlp": {
+      "type": "string",
+      "title": "Kernel-enforced file rendering (Windows)",
+      "description": "On Windows, render secret values into files through the manually-installed sandbox-dlp system service (a user-mode provider over WinFsp, which reports the requesting process id) so the rendered value is readable ONLY by the secrets-guard command's process subtree and NEVER touches disk — every other process reading the file sees the original references. 'auto' (default) uses the service when installed and falls back to the in-place renderer otherwise; 'require' is provider-only and fails closed (skips file rendering rather than writing a value to disk) when the service is absent; 'off' keeps the in-place renderer. Ignored on Linux and in Cowork (the mount-namespace bind-mount already isolates) and on macOS, where SIP prevents any robust kext-free per-process substitution, so macOS uses the in-place renderer with its crash-recovery journal.",
+      "default": "auto"
+    },
+    "dlp_install_source": {
+      "type": "string",
+      "title": "sandbox-dlp installer source",
+      "description": "Override the base URL the plugin downloads the sandbox-dlp installer from (for air-gapped or on-prem mirrors). Leave empty to use the default GitHub release.",
+      "default": ""
     }
   }
 }

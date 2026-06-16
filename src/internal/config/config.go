@@ -35,6 +35,18 @@ type Config struct {
 	Sandbox      string // auto | on | off
 	SandboxGlobs string // comma-separated globs overriding the default scan set
 
+	// KernelDLP controls WINDOWS file rendering via the sandbox-dlp service (a user-mode
+	// provider over WinFsp, which propagates the requesting process id): the rendered
+	// value is served only to the command's process subtree and never touches disk.
+	// `auto` (default) uses the service when present and falls back to the in-place
+	// renderer otherwise; `require` is provider-only and fails closed (skips file
+	// rendering — never writes a value to disk) when the service is absent; `off` keeps
+	// the in-place renderer. Ignored on Linux (mount-namespace bind-mount already
+	// isolates), in Cowork, and on macOS — where SIP prevents any robust kext-free
+	// per-process substitution, so macOS keeps the in-place renderer + recovery journal.
+	KernelDLP        string // auto | require | off (Windows only)
+	DLPInstallSource string // override URL/base for the sandbox-dlp installer (air-gapped mirrors)
+
 	// IsCowork is the resolved detection: true when this process is the Cowork host
 	// hook (the agent's commands run in the VM). Deterministic via
 	// CLAUDE_CODE_IS_COWORK; an explicit execution_mode of cowork/local overrides it.
@@ -57,6 +69,7 @@ func Load(env Getenv) Config {
 		ExecutionMode:       "auto",
 		CoworkRefPolicy:     "audit",
 		Sandbox:             "auto",
+		KernelDLP:           "auto",
 	}
 
 	c.VaultProvider = oneOf(env(prefix+"VAULT_PROVIDER"), c.VaultProvider, "auto", "keeper", "1password")
@@ -76,6 +89,8 @@ func Load(env Getenv) Config {
 	c.CoworkRefPolicy = oneOf(env(prefix+"COWORK_REF_POLICY"), c.CoworkRefPolicy, "audit", "enforce")
 	c.Sandbox = oneOf(env(prefix+"SANDBOX"), c.Sandbox, "auto", "on", "off")
 	c.SandboxGlobs = strings.TrimSpace(env(prefix + "SANDBOX_GLOBS"))
+	c.KernelDLP = oneOf(env(prefix+"KERNEL_DLP"), c.KernelDLP, "auto", "require", "off")
+	c.DLPInstallSource = strings.TrimSpace(env(prefix + "DLP_INSTALL_SOURCE"))
 
 	// Detect the Cowork host hook (the agent's commands run in the VM). The detector
 	// is deterministic — Claude Code sets CLAUDE_CODE_IS_COWORK=1 in the host hook's

@@ -6,6 +6,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Windows kernel-level DLP (`sandbox-dlp`), in progress.** A new per-user system
+  service that renders secret values into files through a **WinFsp** user-mode provider,
+  so the rendered value is readable **only** by the secrets-guard command's process
+  subtree and **never touches disk** — every other process reading the file sees the
+  original references. New `kernel_dlp` option (`auto`/`require`/`off`, Windows only) and
+  `dlp_install_source`; `secrets-guard dlp-status` / `dlp-install`; a SessionStart
+  detect-and-trigger that surfaces a one-time notice and best-effort launches the
+  installer (UAC). The OS-independent core (`internal/projection`, `internal/dlpipc`), the
+  client wiring, the process-subtree oracles, and the named-pipe/unix-socket control
+  servers are implemented and tested; the WinFsp provider is written and exercised on a
+  Windows host (cgo + WinFsp can't be built from macOS). See `docs/sandbox-dlp.md`.
+
+### Decided
+- **macOS keeps the in-place renderer; the strong per-process + never-on-disk property is
+  Windows-only.** Empirically, every kext-free per-process file-content mechanism on macOS
+  is defeated by SIP: fuse-t reports caller pid 0, FSKit exposes no caller identity,
+  EndpointSecurity can't rewrite reads, and DYLD interposition is stripped through system
+  shells (and the command wrap goes through `sh`). The only robust macOS option is a kext
+  (macFUSE), which needs a reduced-security install end users can't be asked to do.
+
 ## [0.4.2] - 2026-06-15
 
 ### Changed

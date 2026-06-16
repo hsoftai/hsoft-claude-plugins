@@ -13,9 +13,9 @@ import (
 // temp dir so tests never touch the real config dir.
 func isolateConfigDir(t *testing.T) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())                  // darwin: UserConfigDir = $HOME/Library/Application Support
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())       // linux-ish fallbacks
-	t.Setenv("AppData", t.TempDir())               // windows
+	t.Setenv("HOME", t.TempDir())            // darwin: UserConfigDir = $HOME/Library/Application Support
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // linux-ish fallbacks
+	t.Setenv("AppData", t.TempDir())         // windows
 }
 
 func TestRenderFiles_InPlaceAndRestore(t *testing.T) {

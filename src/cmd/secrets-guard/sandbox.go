@@ -206,16 +206,28 @@ func renderAndExec(cfg config.Config, cmd []string, withFiles bool) {
 		}
 	}
 
-	// 2) Render FILES. Linux uses a private bind-mount (value never on real disk);
-	// macOS/Windows render in place and return a restore() that reverts the originals
-	// after the command (a crash-recovery journal makes that safe). On failure, leave
-	// files literal — env and command are still rendered.
+	// 2) Render FILES. Three strategies, in order of strength:
+	//   - kernel DLP (macOS/Windows, sandbox-dlp installed): the rendered content is
+	//     served by the service ONLY to this command's process subtree; the value never
+	//     touches disk. The command runs with its cwd inside the service mount.
+	//   - in-place (Linux bind-mount = value never on disk; macOS/Windows fallback =
+	//     value briefly on the real file, restored after, crash-recovery journal).
+	//   - require + service down: skip file rendering entirely (fail-closed; no value on
+	//     disk) — env and command are still rendered.
 	restore := func() {}
+	childDir := ""
 	if withFiles && len(files) > 0 {
-		if r, err := renderFiles(files, values); err != nil {
-			fmt.Fprintln(os.Stderr, "secrets-guard sandbox: file rendering unavailable:", err)
-		} else if r != nil {
-			restore = r
+		if kernelDLPActive(cfg) {
+			if mp, dereg, ok := dlpRender(files, values); ok {
+				restore, childDir = dereg, mp
+			} else if cfg.KernelDLP == "require" {
+				fmt.Fprintln(os.Stderr, "secrets-guard sandbox: sandbox-dlp no disponible; "+
+					"se omite el renderizado de archivos (kernel_dlp=require, fail-closed)")
+			} else {
+				restore = inPlaceRender(files, values)
+			}
+		} else {
+			restore = inPlaceRender(files, values)
 		}
 	}
 
@@ -229,10 +241,25 @@ func renderAndExec(cfg config.Config, cmd []string, withFiles bool) {
 
 	childEnv := mapToEnv(stripSandboxEnv(env))
 	childEnv = append(childEnv, envSandboxActive+"=1")
-	// Run the command, redact its output inline (so a printed value is masked, not
-	// just blocked), and restore in-place-rendered files afterward — even on a
-	// terminating signal.
-	execChildWithRestore(childEnv, cmd, values, restore)
+	// Run the command (with its cwd inside the DLP mount when active), redact its output
+	// inline (so a printed value is masked, not just blocked), and restore/deregister
+	// afterward — even on a terminating signal.
+	execChildWithRestore(childEnv, cmd, values, restore, childDir)
+}
+
+// inPlaceRender renders the ref-files in place (Linux bind-mount or macOS/Windows
+// write+restore) and returns the restore function. On failure it warns and returns a
+// no-op, leaving the files literal (env and command are still rendered).
+func inPlaceRender(files []refFile, values map[string]string) func() {
+	r, err := renderFiles(files, values)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "secrets-guard sandbox: file rendering unavailable:", err)
+		return func() {}
+	}
+	if r == nil {
+		return func() {}
+	}
+	return r
 }
 
 // valueList returns the resolved secret values as a slice (for redaction/registration).
@@ -435,7 +462,7 @@ func execCommandEnv(env, cmd []string) {
 // then restores any in-place-rendered files — exactly once, even if the process is
 // interrupted by a terminating signal mid-command. (On Linux, restore is a no-op:
 // the namespace's bind-mounts vanish on exit.)
-func execChildWithRestore(env, cmd []string, values map[string]string, restore func()) {
+func execChildWithRestore(env, cmd []string, values map[string]string, restore func(), dir string) {
 	var once sync.Once
 	doRestore := func() {
 		if restore != nil {
@@ -451,7 +478,7 @@ func execChildWithRestore(env, cmd []string, values map[string]string, restore f
 			os.Exit(130)
 		}()
 	}
-	code := runChildRedacted(env, cmd, values)
+	code := runChildRedacted(env, cmd, values, dir)
 	doRestore()
 	os.Exit(code)
 }
@@ -459,7 +486,7 @@ func execChildWithRestore(env, cmd []string, values map[string]string, restore f
 // runChildRedacted runs the command and streams its stdout/stderr through redaction:
 // every resolved value (in any guarded encoding) and any high-confidence detected
 // secret is masked before it reaches the caller. Returns the child's exit code.
-func runChildRedacted(env, cmd []string, values map[string]string) int {
+func runChildRedacted(env, cmd []string, values map[string]string, dir string) int {
 	vlist := valueList(values)
 	eng := detect.New()
 	red := redact.New(eng)
@@ -474,6 +501,7 @@ func runChildRedacted(env, cmd []string, values map[string]string) int {
 	c := exec.Command(cmd[0], cmd[1:]...)
 	c.Env = env
 	c.Stdin = os.Stdin
+	c.Dir = dir // empty = inherit cwd; set to the DLP mountpoint when kernel DLP is active
 	outR, oerr := c.StdoutPipe()
 	errR, eerr := c.StderrPipe()
 	if oerr != nil || eerr != nil {

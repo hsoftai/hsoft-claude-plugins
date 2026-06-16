@@ -71,6 +71,12 @@ func main() {
 		case "read":
 			runRead()
 			return
+		case "dlp-status":
+			runDLPStatus()
+			return
+		case "dlp-install":
+			runDLPInstall(config.Load(os.Getenv))
+			return
 		}
 	}
 	runHook()
@@ -133,6 +139,10 @@ func runHook() {
 		if cfg.IsCowork {
 			spawnCwHost(cfg, in.SessionID)
 		}
+		// Windows: if kernel DLP is enabled but the sandbox-dlp service/WinFsp is not
+		// installed, surface a one-time notice and best-effort launch the installer
+		// (UAC). No-op on macOS/Linux and in Cowork.
+		maybeTriggerDLPInstall(cfg)
 		return // no stdout → nothing injected into context
 	}
 

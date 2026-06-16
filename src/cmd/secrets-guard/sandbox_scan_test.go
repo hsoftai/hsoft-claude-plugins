@@ -17,13 +17,13 @@ func TestScanRefFiles(t *testing.T) {
 		}
 	}
 
-	write(".env", "DB=op://v/i/password\nPORT=8080\n")            // matches, has ref
-	write("config.yaml", "token: keeper://UID/field/password\n")  // matches, has ref
-	write("settings.json", `{"x":"op://a/b/c"}`)                  // matches, has ref
-	write("README.md", "see op://v/i/p")                          // no glob match → skipped
-	write("clean.yaml", "port: 8080\n")                           // matches glob, no ref
+	write(".env", "DB=op://v/i/password\nPORT=8080\n")           // matches, has ref
+	write("config.yaml", "token: keeper://UID/field/password\n") // matches, has ref
+	write("settings.json", `{"x":"op://a/b/c"}`)                 // matches, has ref
+	write("README.md", "see op://v/i/p")                         // no glob match → skipped
+	write("clean.yaml", "port: 8080\n")                          // matches glob, no ref
 	write("node_modules/pkg/.env", "K=op://v/i/p")               // skipped dir
-	write("sub/app.toml", "secret = \"op://t/u/v\"\n")            // nested, matches
+	write("sub/app.toml", "secret = \"op://t/u/v\"\n")           // nested, matches
 
 	// binary file with a matching glob name must be skipped
 	write("bin.json", "{\"a\":\"op://x/y/z\"\x00}")
