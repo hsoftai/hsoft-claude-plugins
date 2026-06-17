@@ -113,12 +113,16 @@ are in the subtree.
    `provider_fuse_windows.go` / `provider_fuse.go`.
 3. **VERIFY THE PID (make-or-break):** run
    `go test -tags sandboxdlp -run TestWinFuse_PerProcessGating ./cmd/sandbox-dlp/`.
-   - If it passes: per-process works through `fuse.Getcontext()`. Done with the core.
-   - If the test `Skip`s with "driver did not expose caller PID": cgofuse isn't surfacing
-     the WinFsp process id. Wire the oracle to **`FspFileSystemOperationProcessId()`**
-     (WinFsp's authoritative source). Smallest change: add a hook in the provider's read
-     path that reads it from the WinFsp host and pass that pid to `reg.Resolve` instead of
-     `fuse.Getcontext()`'s pid.
+   **RESULT (resolved 2026-06): WinFsp does NOT expose the caller PID during `Read`** — it
+   only populates `fuse_context.pid` for `Create`/`Open`/`Rename` (a Windows limitation:
+   the cache manager decouples reads from the originating process; sources: winfsp/winfsp
+   #99, release notes v1.2POST1, `fuse_intf.c` `fsp_fuse_op_enter/leave`). So calling
+   `fuse.Getcontext()` inside `Read` returns `-1`. **`FspFileSystemOperationProcessId()`
+   does NOT help** — it reads the same request-token PID that is absent during `Read`.
+   The implemented fix (the maintainer's recommended pattern) is to **capture the PID in
+   `Open`/`Create` (where it is valid) and key it to the returned file handle (`fh`)**;
+   `Read` and the post-open `Getattr` then resolve the caller by `fh`. See
+   `provider_fuse.go` (`openHandle`/`callerPID`) and `provider_fuse_windows.go`.
 4. **Mount options:** confirm caching is actually off (`FileInfoTimeout=0` etc. in
    `fuseMountOpts`). If repeated reads return stale content for the wrong process, caching
    is the cause. If directory mounts misbehave, switch to a drive-letter mountpoint (have
@@ -143,13 +147,55 @@ are in the subtree.
 - **Verified (this repo, macOS dev host):** projection core (`go test -race`), protocol,
   IPC client/server (darwin), client wiring (`dlp_test.go`), the darwin FUSE provider
   *mounts and never writes disk* (via fuse-t), full cross-compilation
-  (darwin/windows/linux × amd64/arm64, default tags). The per-process property was
-  validated on macFUSE-class semantics; fuse-t can't show it (pid 0) but proves the mount
-  + never-on-disk mechanics.
-- **Pending (needs a Windows host):** compiling `-tags sandboxdlp` on Windows, the
-  `fuse.Getcontext()` pid verification, mount-option tuning, the installer, and the real
-  end-to-end. None of this is verifiable from macOS (cgo can't cross-compile to Windows,
-  and WinFsp is Windows-only).
+  (darwin/windows/linux × amd64/arm64, default tags).
+- **Verified (Windows host, 2026-06 — Windows Server 2025, Go 1.26, WinFsp 2.x):**
+  `-tags sandboxdlp` compiles (cgofuse v1.6.0 + WinFsp FUSE headers); the per-process
+  property holds end to end — `TestWinFuse_PerProcessGating` and
+  `TestWinFuse_MountsAndNeverWritesDisk` pass, including `-race`; `sandbox-dlp serve` +
+  `secrets-guard dlp-status` over the owner-only named pipe; the installer
+  (`-ExePath` local build, Run-key fallback when not elevated); and a real-binary E2E
+  (`secrets-guard sandbox -- node …` with a mock `op`): the in-subtree reader saw the
+  rendered value, an unrelated process reading the same mounted `.env` saw only the
+  `op://` reference, and the on-disk file never changed.
+- **Windows adjustments made (see "Windows implementation notes" below):** PID captured at
+  `Open` keyed by `fh` (not `FspFileSystemOperationProcessId`); `-o direct_io` added; mount
+  made synchronous (register blocks until the volume serves); ancestry-walk oracle replaced
+  by a Job Object + `IsProcessInJob`.
+- **Pending / out of scope this pass:** Authenticode-signed binaries + a signed MSI (the
+  installer ships unsigned with the signing steps TODO'd); running through an actual
+  `claude -p` (the hook reduces to the same `secrets-guard sandbox -- …` invocation that
+  the E2E exercises directly).
+
+## Windows implementation notes (as built, 2026-06)
+
+- **Caller PID by file handle.** `projFS` keeps an `fh -> pid` table; `Open`/`Create`/
+  `Opendir` capture `fuse.Getcontext()`'s pid (valid there on WinFsp) and key it to a real
+  handle; `Read` and the post-open `Getattr` resolve the caller via `callerPID(fh)`.
+  `callerPID` is per-OS: Windows reads the handle's stored pid (fail-closed to `-1` for an
+  unknown handle), darwin keeps the validated live-`Getcontext` path. This is why
+  `FspFileSystemOperationProcessId()` was NOT wired in — it carries the same token PID that
+  WinFsp omits during `Read`.
+- **Caching off for per-read gating.** `fuseMountOpts` adds `-o direct_io` (plus the
+  `*Timeout=0` options) so every read reaches the handler and one process's read is never
+  served from another's cached bytes.
+- **Synchronous mount.** `fuseMounter.Mount` now blocks (`waitMountReady`) until the
+  mountpoint answers a directory listing before returning, so a client that `chdir`s into
+  the mountpoint right after a successful `Register` never races the async WinFsp mount.
+- **Job Object oracle.** `oracle_windows.go` creates a Job Object per exec, assigns the
+  root PID before the command is spawned (descendants inherit the job), and answers
+  membership with `IsProcessInJob` (race-free, no PID reuse). `IsProcessInJob` is not in
+  `golang.org/x/sys/windows`, so it is bound from `kernel32.dll` directly. The job handle
+  is released on deregister (`service.go` `closeOracle`). The ancestry walk
+  (`CreateToolhelp32Snapshot`) remains as a fail-safe fallback if the job can't be created.
+- **Build toolchain.** cgofuse's Windows cgo needs WinFsp's FUSE headers
+  (`<fuse.h>`/`<fuse_common.h>`/`<fuse_opt.h>` + `<winfsp/winfsp.h>`). The winget WinFsp
+  package ships only the runtime; obtain the headers via an MSI admin-extract
+  (`msiexec /a winfsp.msi TARGETDIR=<dir>`) and build with
+  `CGO_CFLAGS=-I<dir>\inc\fuse -I<dir>\inc` (CGO_ENABLED=1, mingw-w64 gcc on PATH).
+- **Installer autostart.** A logon Scheduled Task needs elevation; the installer falls back
+  to a per-user `HKCU\…\Run` entry (no elevation) for the autostart, and starts the service
+  immediately. WinFsp's own install still requires elevation (kernel driver). Binaries and
+  the script are unsigned for now (signing is TODO'd in the script).
 
 ## Security model & residuals
 

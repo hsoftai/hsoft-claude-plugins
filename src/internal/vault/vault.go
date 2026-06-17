@@ -37,7 +37,7 @@ func (execRunner) Look(name string) bool {
 }
 
 func (execRunner) Run(name string, args ...string) (string, error) {
-	out, err := exec.Command(name, args...).Output()
+	out, err := vaultCommand(name, args).Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
 			return "", fmt.Errorf("%s failed: %s", name, strings.TrimSpace(string(ee.Stderr)))

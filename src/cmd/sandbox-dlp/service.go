@@ -47,36 +47,72 @@ func (s *Service) handleRegister(req projection.RegisterRequest) projection.Resp
 	if err := req.Validate(); err != nil {
 		return projection.Response{Error: err.Error()}
 	}
+	// Build the subtree oracle BEFORE the command is spawned so the root process is
+	// already placed in its Job Object (Windows) and the command inherits it on spawn.
+	oracle := newSubtreeOracle(req.RootPID)
 	unmount, err := s.mnt.Mount(req.ExecID, req.Mountpoint, req.Root, s.reg)
 	if err != nil {
+		// The oracle may own OS resources (a job handle); release them on mount failure.
+		closeOracle(oracle)
 		return projection.Response{Error: fmt.Sprintf("mount: %v", err)}
 	}
-	req.Apply(s.reg, newSubtreeOracle(req.RootPID))
+	// Teardown must both unmount and release any oracle-owned OS resources.
+	cleanup := func() error {
+		err := unmount()
+		closeOracle(oracle)
+		return err
+	}
 	s.mu.Lock()
 	// Replace any prior mount for this exec id (deregister the old one).
 	if old := s.mounts[req.ExecID]; old != nil {
 		_ = old()
 	}
-	s.mounts[req.ExecID] = unmount
+	s.mounts[req.ExecID] = cleanup
+	// Register in s.reg only after the cleanup is stored, and while still holding
+	// s.mu, so a concurrent handleDeregister that observes the exec in s.reg is
+	// guaranteed to find (and run) the corresponding cleanup. Otherwise a deregister
+	// racing between Apply and the store would close nothing, leaking the oracle's
+	// Job Object handle and the mount goroutine.
+	req.Apply(s.reg, oracle)
 	s.mu.Unlock()
 	return projection.Response{OK: true}
 }
 
-// handleDeregister ends an exec: it scrubs the rendered bytes from RAM (registry) and
-// tears down the mount. Scrub happens first, so any read racing the teardown gets the
-// original reference (pass-through), never a value.
+// handleDeregister ends an exec: it tears down the mount FIRST, then scrubs the rendered
+// bytes from RAM (registry). Unmount stops the FUSE handlers and waits for in-flight reads
+// to drain, so by the time the scrub runs no Read can be mid-copy of the buffer. Scrubbing
+// before unmount would let a racing read copy out half-zeroed bytes (neither the value nor
+// the reference); doing it after keeps the teardown fail-closed.
 func (s *Service) handleDeregister(req projection.DeregisterRequest) projection.Response {
-	if !s.reg.Deregister(req.ExecID, req.Token) {
+	// Acquire s.mu before r.mu (the registry methods take r.mu) to match handleRegister's
+	// ordering (it calls req.Apply → reg.Register while holding s.mu). Reversing the order
+	// here would let a register and deregister race into a lock-ordering deadlock.
+	s.mu.Lock()
+	// Authorize without removing/scrubbing yet: a bad token must leave the exec fully
+	// intact (still mounted, still serving).
+	if !s.reg.CheckToken(req.ExecID, req.Token) {
+		s.mu.Unlock()
 		return projection.Response{Error: "unknown exec or bad token"}
 	}
-	s.mu.Lock()
 	unmount := s.mounts[req.ExecID]
 	delete(s.mounts, req.ExecID)
 	s.mu.Unlock()
+	// Stop the filesystem (and drain in-flight reads) before scrubbing the secret bytes.
 	if unmount != nil {
 		_ = unmount()
 	}
+	// Now no reader can observe the buffer; scrub it from RAM.
+	s.reg.Deregister(req.ExecID, req.Token)
 	return projection.Response{OK: true}
+}
+
+// closeOracle releases any OS resources an oracle owns (e.g. the Windows Job Object
+// handle). Oracles that hold no resources (the darwin oracle) don't implement Close, so
+// this is a no-op for them.
+func closeOracle(oracle projection.SubtreeOracle) {
+	if c, ok := oracle.(interface{ Close() error }); ok {
+		_ = c.Close()
+	}
 }
 
 // activeExecs reports how many execs are currently projected (for status).

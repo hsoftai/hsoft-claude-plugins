@@ -32,6 +32,8 @@ Paths:
     "CLAUDE_PLUGIN_OPTION_TOOL_INPUT_POLICY": "deny",
     "CLAUDE_PLUGIN_OPTION_TOOL_OUTPUT_MODE": "redact",
     "CLAUDE_PLUGIN_OPTION_AUDIT_LOG_PATH": "/var/log/secrets-guard/audit.log",
+    "CLAUDE_PLUGIN_OPTION_SANDBOX": "auto",
+    "CLAUDE_PLUGIN_OPTION_KERNEL_DLP": "auto",
     "KSM_CONFIG": "<base64-keeper-config>"
   }
 }
@@ -55,8 +57,14 @@ What each key does:
 
 ## Vault credentials on the fleet
 
-- **Keeper:** redeem a one-time token once, store the resulting base64 config, and
-  push it as `KSM_CONFIG` via `env`. The `ksm` CLI must be on `PATH`.
+The vault CLI is a **fleet prerequisite, provisioned by MDM — it is NOT installed by the
+plugin or by the Windows `sandbox-dlp` installer** (which only ships WinFsp, the
+`sandbox-dlp` service, and the `secrets-guard` binary). Push the CLI and its credentials
+the same way you push `managed-settings.json`:
+
+- **Keeper:** install the `ksm` CLI on `PATH` (MDM package; on Windows the Inno-Setup EXE
+  `KeeperSecurity.KeeperSecretsManager`). Redeem a one-time token once, store the resulting
+  base64 config, and push it as `KSM_CONFIG` via `env`.
 - **1Password:** the `op` CLI must be installed and the device authorized.
 - On an Entra/Intune-joined fleet, consider Azure Key Vault with the developer's
   existing identity to avoid distributing vault tokens (extensible provider).

@@ -83,6 +83,17 @@ func (r *Registry) Register(execID, root, mountpoint string, rendered map[string
 	}
 }
 
+// CheckToken reports whether execID is registered with the matching token, without
+// removing it or scrubbing its bytes. The service uses it to authorize a deregister and
+// unmount the projection (stopping all readers) BEFORE the scrubbing Deregister runs, so
+// no read can race a half-scrubbed buffer.
+func (r *Registry) CheckToken(execID, token string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	reg, ok := r.byExec[execID]
+	return ok && reg.token == token
+}
+
 // Deregister ends an exec and scrubs its rendered bytes from memory. It is a no-op
 // unless the token matches the one given at Register (so only the owning sandbox
 // process can tear down its exec). It returns whether an exec was removed.
@@ -124,6 +135,47 @@ func (r *Registry) Resolve(path string, callerPID int) (content []byte, serve bo
 		return nil, false
 	}
 	return nil, false
+}
+
+// IsManaged reports whether path is a declared ref-file of some active exec, regardless of
+// caller. The provider uses it to REFUSE writes/renames/removes of a rendered file, so the
+// secret value can never be persisted to the backing and the on-disk reference file is
+// never modified through the mount. It is read-only and does not affect the per-caller
+// serve decision in Resolve.
+func (r *Registry) IsManaged(path string) bool {
+	clean := filepath.Clean(path)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.isManagedLocked(clean)
+}
+
+// isManagedLocked reports whether clean (already filepath.Clean'd) is a declared ref-file
+// of some active exec. Callers must hold r.mu.
+func (r *Registry) isManagedLocked(clean string) bool {
+	for _, reg := range r.byExec {
+		if _, ok := reg.rendered[clean]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// MutateIfUnmanaged runs fn (a destructive filesystem operation on the given backing
+// paths) atomically with respect to registration: it holds the registry lock across both
+// the managed-file check and fn, so a path cannot become a declared ref-file between the
+// check and the operation (the Write/Truncate/Unlink/Rename TOCTOU). If any of paths is
+// currently a declared ref-file, fn is NOT run and ok is false (fail-closed: the provider
+// returns EACCES); otherwise fn runs under the lock and ok is true. fn must not call back
+// into the registry (it would deadlock) and should be a single quick syscall.
+func (r *Registry) MutateIfUnmanaged(fn func() error, paths ...string) (err error, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, p := range paths {
+		if r.isManagedLocked(filepath.Clean(p)) {
+			return nil, false
+		}
+	}
+	return fn(), true
 }
 
 // Active reports the number of registered execs (for health/status reporting).

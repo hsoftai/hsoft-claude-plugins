@@ -77,25 +77,25 @@ func dlpRender(files []refFile, values map[string]string) (mountpoint string, de
 		return "", nil, false
 	}
 
-	mp, err := os.MkdirTemp(shortTmp(), "sgmnt")
+	mountTarget, mp, mpCleanup, err := chooseMountpoint()
 	if err != nil {
 		return "", nil, false
 	}
 	token, err := projection.NewToken()
 	if err != nil {
-		_ = os.RemoveAll(mp)
+		mpCleanup()
 		return "", nil, false
 	}
 	execID, err := projection.NewToken()
 	if err != nil {
-		_ = os.RemoveAll(mp)
+		mpCleanup()
 		return "", nil, false
 	}
 
 	req := projection.RegisterRequest{
 		ExecID:     execID,
 		Root:       cwd(),
-		Mountpoint: mp,
+		Mountpoint: mountTarget,
 		Files:      rf,
 		RootPID:    os.Getpid(), // this process + the command it spawns = the authorized subtree
 		Token:      token,
@@ -103,7 +103,7 @@ func dlpRender(files []refFile, values map[string]string) (mountpoint string, de
 	}
 	resp, err := dlpipc.Call(projection.ControlRequest{Op: projection.OpRegister, Register: &req})
 	if err != nil || !resp.OK {
-		_ = os.RemoveAll(mp)
+		mpCleanup()
 		return "", nil, false
 	}
 
@@ -112,7 +112,7 @@ func dlpRender(files []refFile, values map[string]string) (mountpoint string, de
 			Op:         projection.OpDeregister,
 			Deregister: &projection.DeregisterRequest{ExecID: execID, Token: token},
 		})
-		_ = os.RemoveAll(mp)
+		mpCleanup()
 	}
 	return mp, deregister, true
 }

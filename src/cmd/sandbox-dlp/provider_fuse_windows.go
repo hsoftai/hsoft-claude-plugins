@@ -14,13 +14,13 @@
 //   3. go build -tags sandboxdlp ./cmd/sandbox-dlp   (cgofuse links WinFsp at runtime)
 //   4. go test  -tags sandboxdlp ./cmd/sandbox-dlp   (the provider_fuse tests run here)
 //
-// ── VERIFY FIRST (the one make-or-break unknown) ─────────────────────────────────────
-//   Confirm fuse.Getcontext() in projFS.rendered() returns the REAL requesting process
-//   id under WinFsp (not 0, not the service pid). Quick check: run the per-process test
-//   (see provider_fuse_windows_test.go scaffold) — an in-subtree reader must get the
-//   rendered value while an unrelated process gets the original references. If the pid
-//   is wrong, wire the oracle to WinFsp's FspFileSystemOperationProcessId() instead
-//   (cgofuse exposes the host; you may need a small addition to read it per-op).
+// ── CALLER PID (resolved) ────────────────────────────────────────────────────────────
+//   WinFsp exposes the originating process id only to Create/Open/Rename, NOT to Read
+//   (a Windows limitation; FspFileSystemOperationProcessId reads the same token and is
+//   likewise empty during Read). So the provider captures the pid in Open/Create — keyed
+//   to the returned file handle — and Read/Getattr resolve it via callerPID(fh) below.
+//   See provider_fuse.go (openHandle) and the "Windows implementation notes" in
+//   docs/sandbox-dlp.md. The per-process test proves the result.
 //
 // ── MOUNTPOINT ───────────────────────────────────────────────────────────────────────
 //   WinFsp mounts onto a directory that must NOT already exist (WinFsp creates it), or a
@@ -37,10 +37,34 @@ import (
 
 func fuseDriverName() string { return "winfsp" }
 
-// prepareMountpoint makes the path suitable for a WinFsp directory mount: the mountpoint
-// itself must not exist, but its parent must.
+// callerPID returns the pid captured for fh at Open/Create/Opendir time. WinFsp does NOT
+// expose the originating pid during Read (only Create/Open/Rename), so the per-read
+// decision must use the pid recorded when the handle was opened. An unknown fh (e.g. a
+// path-only Getattr with no open handle) fails closed: -1 is never in any subtree, so the
+// provider serves the original references.
+func (p *projFS) callerPID(fh uint64) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if pid, ok := p.handles[fh]; ok {
+		return pid
+	}
+	return -1
+}
+
+// isDriveLetter reports whether mp is a bare drive-letter mountpoint like "Z:".
+func isDriveLetter(mp string) bool {
+	return len(mp) == 2 && mp[1] == ':'
+}
+
+// prepareMountpoint makes the path suitable for the WinFsp mount. For a drive letter
+// (the default, so native modules load — see dlp_mount_windows.go) there is nothing to
+// prepare: WinFsp creates the volume at the letter. For a directory mount the mountpoint
+// itself must not exist (WinFsp creates it) while its parent must.
 func prepareMountpoint(mp string) error {
-	_ = os.Remove(mp) // WinFsp creates the mountpoint; it must be absent
+	if isDriveLetter(mp) {
+		return nil
+	}
+	_ = os.Remove(mp)
 	return os.MkdirAll(filepath.Dir(mp), 0o700)
 }
 
@@ -64,5 +88,12 @@ func fuseMountOpts(mountpoint string) []string {
 		"-o", "FileInfoTimeout=0",
 		"-o", "DirInfoTimeout=0",
 		"-o", "VolumeInfoTimeout=0",
+		// NOTE: -o direct_io would force every read through the handler (ideal for the
+		// per-process ref-file gate), but it also disables the cache that Windows needs to
+		// memory-map image sections — so DLL / native-addon (.node) loads from the mount
+		// fail with ACCESS_DENIED and real toolchains (Next.js/SWC) can't run. We rely on
+		// FileInfoTimeout=0 instead; the per-read gate is still honored because the read
+		// handler resolves the caller per file-handle on every Read (validated by the
+		// per-process test).
 	}
 }

@@ -10,9 +10,21 @@
 
 package main
 
-import "os"
+import (
+	"os"
+
+	"github.com/winfsp/cgofuse/fuse"
+)
 
 func fuseDriverName() string { return "macfuse" }
+
+// callerPID reads the originating pid live from the FUSE context. macFUSE delivers it to
+// every operation (including Read), so darwin keeps the validated per-read source rather
+// than the handle-captured pid Windows must use. fh is unused here.
+func (p *projFS) callerPID(fh uint64) int {
+	_, _, pid := fuse.Getcontext()
+	return pid
+}
 
 // macFUSE wants the mountpoint directory to exist.
 func prepareMountpoint(mp string) error { return os.MkdirAll(mp, 0o700) }
