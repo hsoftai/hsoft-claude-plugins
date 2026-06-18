@@ -236,6 +236,31 @@ the plugin, configured automatically with no manual step:
   immediately. WinFsp's own install still requires elevation (kernel driver). Binaries and
   the script are unsigned for now (signing is TODO'd in the script).
 
+## Proactive redaction guard (service-side, Windows)
+
+The sandbox stops a value from being *written to disk*; the redaction guard stops a value
+from *reaching the model* — even one that was never referenced this session (e.g. a
+hardcoded secret the agent tries to `Read`). On macOS/Linux the per-session in-memory cache
+(`internal/cache`, a 0700 unix-socket daemon) holds the resolved values and the hook scans
+tool I/O against them. That cache does not apply on Windows (its unix ownership/permission
+model rejects the socket dir), and the client holds no credential, so the guard runs **in
+the service**:
+
+- The hook routes every scan through the control channel: `OpScan{text}` → the service
+  redacts `text` against EVERY value its credential can read and returns only the
+  already-redacted text + a `found` flag. The matched VALUES never cross the wire.
+- The service keeps those values in its own RAM (`valueGuardStore`, refreshed on a short
+  TTL via `vault.AllSecretValues`, invalidated on `create`), so the credential and the
+  values stay inside the service exactly as for file rendering.
+- The client selects the guard with `valueGuard(cfg)`: `serviceCache` (→ `OpScan`) on the
+  Windows kernel-DLP path, the local in-memory cache otherwise. The hook's `UserPromptSubmit`
+  / `PreToolUse` / `PostToolUse` paths and `redact-stream` all go through it, so a prompt,
+  tool input, tool output, or file read carrying a vault value is blocked or redacted.
+- Toggle with `PRELOAD_SECRETS` (`auto`|`on`|`off`); `off` limits the guard to
+  session-resolved values. `vault.AllSecretValues` collects field/custom/notes values only
+  (never titles/labels/UIDs) and drops values shorter than 6 bytes to avoid pathological
+  over-redaction of short common strings.
+
 ## Security model & residuals
 
 - Confidentiality on Windows: the rendered value lives only in the per-user service's RAM

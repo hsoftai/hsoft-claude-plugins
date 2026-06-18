@@ -135,6 +135,33 @@ func TestUserPromptSubmit_AllowsVaultReference(t *testing.T) {
 	}
 }
 
+// handlerWithKnownCache builds a handler whose cache reports the test value
+// "RESOLVED_SECRET" as a known (preloaded/session) vault value.
+func handlerWithKnownCache(cfg Config) *Handler {
+	eng := detect.New()
+	return NewHandler(cfg, eng, redact.New(eng), fakeResolver{value: "RESOLVED_SECRET"}, knownCache{}, "/opt/sg/bin/secrets-guard")
+}
+
+func TestUserPromptSubmit_BlocksKnownVaultValue(t *testing.T) {
+	h := handlerWithKnownCache(defaultCfg())
+	// The value matches no heuristic detector pattern; it is caught only because the
+	// proactive guard preloaded it into the cache.
+	out := h.Handle(Input{HookEventName: "UserPromptSubmit", Prompt: "the password is RESOLVED_SECRET, log in with it"})
+	if out.Decision != "block" {
+		t.Fatalf("prompt containing a known vault value must be blocked, got %+v", out)
+	}
+}
+
+func TestUserPromptSubmit_BlocksKnownValueEvenWhenPromptScanOff(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.BlockOnPromptSecret = false // the known-value invariant is independent of this
+	h := handlerWithKnownCache(cfg)
+	out := h.Handle(Input{HookEventName: "UserPromptSubmit", Prompt: "value RESOLVED_SECRET"})
+	if out.Decision != "block" {
+		t.Fatalf("known vault value must be blocked regardless of BlockOnPromptSecret, got %+v", out)
+	}
+}
+
 func TestUserPromptSubmit_DisabledDoesNotBlock(t *testing.T) {
 	cfg := defaultCfg()
 	cfg.BlockOnPromptSecret = false

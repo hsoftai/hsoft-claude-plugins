@@ -34,6 +34,7 @@ Paths:
     "CLAUDE_PLUGIN_OPTION_AUDIT_LOG_PATH": "/var/log/secrets-guard/audit.log",
     "CLAUDE_PLUGIN_OPTION_SANDBOX": "auto",
     "CLAUDE_PLUGIN_OPTION_KERNEL_DLP": "auto",
+    "CLAUDE_PLUGIN_OPTION_PRELOAD_SECRETS": "auto",
     "KSM_CONFIG": "<base64-keeper-config>"
   }
 }
@@ -47,6 +48,26 @@ What each key does:
 - **`strictKnownMarketplaces`** — lockdown: only this marketplace can be added.
 - **`env`** — sets the plugin's options (inherited by the hook subprocess) and the
   vault's headless credentials (`KSM_CONFIG` for Keeper).
+
+### Execution & redaction options
+
+- **`SANDBOX`** (`auto` | `on` | `off`) — the sandbox renders vault references (in the
+  environment and in files under the working directory) into real values for the
+  command's process only. `off` is the **kill switch**: no command is wrapped and no
+  file is rendered (references are left literal). `auto` enables it wherever a vault can
+  resolve; `on` forces it.
+- **`KERNEL_DLP`** (`auto` | `require` | `off`, **Windows only**) — selects the WinFsp
+  `sandbox-dlp` service for per-process file rendering. `off` keeps the in-place
+  renderer; `require` fails closed when the service is absent (never writes a value to
+  disk); `auto` uses the service when present. Set `off` to disable the kernel-DLP path
+  on Windows independently of `SANDBOX`.
+- **`PRELOAD_SECRETS`** (`auto` | `on` | `off`) — the proactive full-vault redaction
+  guard. When enabled (default), every value the vault exposes is held in memory (in the
+  per-session cache on macOS/Linux, in the `sandbox-dlp` service on Windows) and any
+  prompt, tool input, tool output, or file read containing one of those values — in any
+  encoding — is redacted or blocked before it reaches the model, even if the value was
+  never referenced. Values never touch disk and never reach the model. `off` limits the
+  guard to values resolved during the session.
 
 ## Authentication for a private/auto-updating marketplace
 

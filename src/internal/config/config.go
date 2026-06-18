@@ -47,6 +47,18 @@ type Config struct {
 	KernelDLP        string // auto | require | off (Windows only)
 	DLPInstallSource string // override URL/base for the sandbox-dlp installer (air-gapped mirrors)
 
+	// PreloadSecrets controls the proactive full-vault redaction guard: at
+	// SessionStart secrets-guard loads EVERY value the vault exposes to its
+	// credential into the per-session in-memory cache (never disk), so any later
+	// prompt, tool input, tool output, or file read containing one of those values
+	// (in any encoding) is redacted or blocked before it can reach the model — even
+	// if the value was never referenced this session. On Windows (kernel-DLP) the
+	// values come from the sandbox-dlp service, the only credential holder. `auto`
+	// (default) and `on` enable it; `off` disables it (only session-resolved values
+	// are guarded). It is the proactive complement to the always-on backstop that
+	// blocks a value secrets-guard itself resolved.
+	PreloadSecrets string // auto | on | off
+
 	// IsCowork is the resolved detection: true when this process is the Cowork host
 	// hook (the agent's commands run in the VM). Deterministic via
 	// CLAUDE_CODE_IS_COWORK; an explicit execution_mode of cowork/local overrides it.
@@ -70,6 +82,7 @@ func Load(env Getenv) Config {
 		CoworkRefPolicy:     "audit",
 		Sandbox:             "auto",
 		KernelDLP:           "auto",
+		PreloadSecrets:      "auto",
 	}
 
 	c.VaultProvider = oneOf(env(prefix+"VAULT_PROVIDER"), c.VaultProvider, "auto", "keeper", "1password")
@@ -91,6 +104,7 @@ func Load(env Getenv) Config {
 	c.SandboxGlobs = strings.TrimSpace(env(prefix + "SANDBOX_GLOBS"))
 	c.KernelDLP = oneOf(env(prefix+"KERNEL_DLP"), c.KernelDLP, "auto", "require", "off")
 	c.DLPInstallSource = strings.TrimSpace(env(prefix + "DLP_INSTALL_SOURCE"))
+	c.PreloadSecrets = oneOf(env(prefix+"PRELOAD_SECRETS"), c.PreloadSecrets, "auto", "on", "off")
 
 	// Detect the Cowork host hook (the agent's commands run in the VM). The detector
 	// is deterministic — Claude Code sets CLAUDE_CODE_IS_COWORK=1 in the host hook's
@@ -129,6 +143,12 @@ func (c Config) SandboxWrap(hasVault bool) bool {
 	}
 	return hasVault // auto
 }
+
+// PreloadEnabled reports whether the proactive full-vault redaction guard should
+// run (preload every vault value into the session cache at SessionStart). `auto`
+// and `on` enable it; the preloader itself no-ops when no vault/service can supply
+// values, so `auto` is safe to leave on everywhere.
+func (c Config) PreloadEnabled() bool { return c.PreloadSecrets != "off" }
 
 func boolOr(v string, def bool) bool {
 	switch strings.ToLower(strings.TrimSpace(v)) {

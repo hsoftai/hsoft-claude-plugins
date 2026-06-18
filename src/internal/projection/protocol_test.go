@@ -100,6 +100,30 @@ func TestEncodeDecode_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestEncodeDecode_ScanRoundTrip(t *testing.T) {
+	req := ControlRequest{Op: OpScan, Scan: &ScanRequest{Text: "secret=hunter2"}}
+	b, err := Encode(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got ControlRequest
+	if err := Decode(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Op != OpScan || got.Scan == nil || got.Scan.Text != "secret=hunter2" {
+		t.Fatalf("scan request lost in round-trip: %+v", got)
+	}
+	// And the scan reply fields.
+	rb, _ := Encode(Response{OK: true, Found: true, Redacted: "secret=[REDACTED]"})
+	var resp Response
+	if err := Decode(rb, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.OK || !resp.Found || resp.Redacted != "secret=[REDACTED]" {
+		t.Fatalf("scan reply lost in round-trip: %+v", resp)
+	}
+}
+
 func TestApply_FeedsRegistry(t *testing.T) {
 	req := validReq(t)
 	if err := req.Validate(); err != nil {

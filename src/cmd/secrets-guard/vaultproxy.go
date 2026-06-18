@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/hsoftai/hsoft-claude-plugins/internal/cache"
 	"github.com/hsoftai/hsoft-claude-plugins/internal/catalog"
 	"github.com/hsoftai/hsoft-claude-plugins/internal/config"
 	"github.com/hsoftai/hsoft-claude-plugins/internal/dlpipc"
+	"github.com/hsoftai/hsoft-claude-plugins/internal/hook"
 	"github.com/hsoftai/hsoft-claude-plugins/internal/projection"
 	"github.com/hsoftai/hsoft-claude-plugins/internal/vault"
 )
@@ -86,4 +88,51 @@ func createSecret(cfg config.Config, dest, title string, fields map[string]strin
 		return it, err
 	}
 	return catalog.CreateSecret(vault.NewRunner(), cfg.OPAccount, dest, title, fields)
+}
+
+// allVaultValues returns every secret value the LOCAL vault exposes, for preloading the
+// per-session in-memory cache (the proactive redaction guard) on macOS/Linux, where the
+// client holds the credential. On Windows the client holds no credential and the cache
+// is unavailable, so the guard runs in the service instead (serviceCache + OpScan).
+func allVaultValues(cfg config.Config) ([]string, error) {
+	r := vault.NewRunner()
+	res, err := vault.Select(cfg.VaultProvider, r, cfg.OPAccount)
+	if err != nil {
+		return nil, err
+	}
+	if res.ProviderName() == "none" {
+		return nil, fmt.Errorf("no vault available")
+	}
+	return vault.AllSecretValues(r, res.ProviderName())
+}
+
+// serviceCache implements hook.SecretCache by delegating redaction to the sandbox-dlp
+// service (Windows), which holds every vault value in its own RAM and returns only the
+// already-redacted text. This is the proactive guard on Windows, where the client has no
+// credential and the per-user unix-socket cache does not apply. Add/Shutdown are no-ops:
+// the service sources and scopes the values itself.
+type serviceCache struct{}
+
+func (serviceCache) Add(string, []string) {}
+
+func (serviceCache) Scan(_, text string) (found bool, redacted string, ok bool) {
+	resp, err := dlpipc.Call(projection.ControlRequest{
+		Op:   projection.OpScan,
+		Scan: &projection.ScanRequest{Text: text},
+	})
+	if err != nil || !resp.OK {
+		return false, text, false // service unreachable: caller falls back
+	}
+	return resp.Found, resp.Redacted, true
+}
+
+func (serviceCache) Shutdown(string) {}
+
+// valueGuard chooses where the resolved/known-value redaction guard lives: the service
+// on Windows kernel-DLP (it holds the values), the per-session in-memory cache otherwise.
+func valueGuard(cfg config.Config) hook.SecretCache {
+	if useServiceVault(cfg) {
+		return serviceCache{}
+	}
+	return cache.New()
 }

@@ -56,6 +56,11 @@ type Response struct {
 	// Status fields (populated only for an OpStatus reply).
 	Active int    `json:"active,omitempty"` // number of projected execs
 	Driver string `json:"driver,omitempty"` // backing FUSE driver name
+	// Scan reply (OpScan): the redacted text and whether any vault value matched. The
+	// service redacts against ALL its vault values so the matched VALUES never cross
+	// the wire — only the already-redacted text comes back.
+	Found    bool   `json:"found,omitempty"`
+	Redacted string `json:"redacted,omitempty"`
 	// Payload carries an OpVault result as JSON (vault metadata / references — NEVER
 	// secret values), so the MCP can list and create secrets through the service (the
 	// only holder of the vault credential) instead of reaching the vault itself.
@@ -68,6 +73,11 @@ const (
 	OpDeregister = "deregister"
 	OpStatus     = "status"
 	OpVault      = "vault"
+	// OpScan asks the service to redact a text against every vault value its credential
+	// can read. It is how the redaction guard works on Windows, where the client holds
+	// no credential and the per-user in-memory cache is unavailable: the values stay in
+	// the service's RAM and only the redacted text is returned.
+	OpScan = "scan"
 )
 
 // Vault sub-actions (the catalog operation the service runs with ITS credential). All
@@ -93,6 +103,11 @@ type VaultRequest struct {
 	Fields  map[string]string `json:"fields,omitempty"` // create: label -> value reference is NOT used; values are provided by the caller only for create
 }
 
+// ScanRequest carries the text the service must redact against all its vault values.
+type ScanRequest struct {
+	Text string `json:"text"`
+}
+
 // ControlRequest is the single message the client sends on a control connection. Op
 // selects which payload is present.
 type ControlRequest struct {
@@ -100,6 +115,7 @@ type ControlRequest struct {
 	Register   *RegisterRequest   `json:"register,omitempty"`
 	Deregister *DeregisterRequest `json:"deregister,omitempty"`
 	Vault      *VaultRequest      `json:"vault,omitempty"`
+	Scan       *ScanRequest       `json:"scan,omitempty"`
 }
 
 // tokenBytes is the size of a one-time token before base64 (256 bits).

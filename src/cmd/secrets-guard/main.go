@@ -53,6 +53,9 @@ func main() {
 		case "cache-daemon":
 			_ = cache.RunDaemon(os.Getenv("SG_SESSION"))
 			return
+		case "preload-secrets":
+			runPreloadSecrets()
+			return
 		case "cw-host":
 			runCwHost()
 			return
@@ -143,6 +146,15 @@ func runHook() {
 		// installed, surface a one-time notice and best-effort launch the installer
 		// (UAC). No-op on macOS/Linux and in Cowork.
 		maybeTriggerDLPInstall(cfg)
+		// Proactive redaction guard: preload every vault value into this session's
+		// in-memory cache so any later prompt/tool/file-read containing a secret is
+		// redacted or blocked before reaching the model. Detached so it never delays
+		// session start; no-op when disabled or when no vault/service can supply values.
+		// On Windows kernel-DLP the guard runs in the service (it holds the values and
+		// the client cache is unavailable), so no client-side preload is needed there.
+		if cfg.PreloadEnabled() && !useServiceVault(cfg) {
+			spawnPreloadSecrets(in.SessionID)
+		}
 		return // no stdout → nothing injected into context
 	}
 
@@ -150,7 +162,7 @@ func runHook() {
 	if err != nil {
 		self = ""
 	}
-	h := hook.NewHandler(toHookConfig(cfg, resolver.ProviderName()), eng, red, resolver, cache.New(), self)
+	h := hook.NewHandler(toHookConfig(cfg, resolver.ProviderName()), eng, red, resolver, valueGuard(cfg), self)
 	if cfg.IsCowork {
 		h.SetCoworkAnchor(coworkAnchor{})
 	}
@@ -167,6 +179,46 @@ func runHook() {
 	if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {
 		fmt.Fprintln(os.Stderr, "secrets-guard: encode:", err)
 	}
+}
+
+// runPreloadSecrets (the detached `preload-secrets` child) loads every value the
+// vault exposes into this session's in-memory cache, so the redaction guard can block
+// or redact any of them before they reach the model. Values live only in the cache
+// daemon's RAM (never disk, never the model). Best-effort: any failure is silent.
+func runPreloadSecrets() {
+	session := os.Getenv("SG_SESSION")
+	if session == "" {
+		return
+	}
+	cfg := config.Load(os.Getenv)
+	if !cfg.PreloadEnabled() {
+		return
+	}
+	vals, err := allVaultValues(cfg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "secrets-guard: preload:", err)
+		return
+	}
+	if len(vals) > 0 {
+		cache.New().Add(session, vals)
+	}
+}
+
+// spawnPreloadSecrets starts the detached `preload-secrets` child for a session so
+// SessionStart returns immediately while the vault is dumped in the background.
+func spawnPreloadSecrets(session string) {
+	self, err := os.Executable()
+	if err != nil {
+		return
+	}
+	cmd := exec.Command(self, "preload-secrets")
+	cmd.Env = append(os.Environ(), "SG_SESSION="+session)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
+	cache.Detach(cmd) // OS-specific: fully detach so it outlives this hook
+	if err := cmd.Start(); err != nil {
+		return
+	}
+	_ = cmd.Process.Release()
 }
 
 func runScan() {
@@ -196,7 +248,7 @@ func runRedactStream() {
 	// encoding). Prefer the in-memory cache daemon; fall back to re-resolving the
 	// recorded references in ephemeral memory if the daemon is unavailable.
 	if session := os.Getenv("SG_SESSION"); session != "" {
-		if _, red, ok := cache.New().Scan(session, text); ok {
+		if _, red, ok := valueGuard(cfg).Scan(session, text); ok {
 			text = red
 		} else if paths := seen.LoadPaths(session); len(paths) > 0 {
 			if resolver, err := vault.Select(cfg.VaultProvider, vault.NewRunner(), cfg.OPAccount); err == nil {

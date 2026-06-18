@@ -20,6 +20,7 @@ import (
 
 	"github.com/hsoftai/hsoft-claude-plugins/internal/catalog"
 	"github.com/hsoftai/hsoft-claude-plugins/internal/projection"
+	"github.com/hsoftai/hsoft-claude-plugins/internal/seen"
 	"github.com/hsoftai/hsoft-claude-plugins/internal/vault"
 )
 
@@ -282,9 +283,65 @@ func dispatchControl(s *Service, req projection.ControlRequest) projection.Respo
 			return projection.Response{Error: "missing vault payload"}
 		}
 		return handleVault(*req.Vault)
+	case projection.OpScan:
+		if req.Scan == nil {
+			return projection.Response{Error: "missing scan payload"}
+		}
+		return handleScan(req.Scan.Text)
 	default:
 		return projection.Response{Error: "unknown op"}
 	}
+}
+
+// valueGuardStore caches, in the service's RAM only, every secret value the credential
+// can read, so OpScan can redact tool I/O against the whole vault without the values
+// ever crossing the control channel. It is refreshed on a short TTL (and invalidated
+// when a secret is created) so a freshly added secret is guarded promptly.
+var valueGuardStore struct {
+	mu       sync.Mutex
+	vals     []string
+	loadedAt time.Time
+}
+
+const valueGuardTTL = 2 * time.Minute
+
+// invalidateValueGuard forces the next OpScan to reload the vault values (called after a
+// create so the new secret is guarded without waiting for the TTL).
+func invalidateValueGuard() {
+	valueGuardStore.mu.Lock()
+	valueGuardStore.loadedAt = time.Time{}
+	valueGuardStore.mu.Unlock()
+}
+
+// guardValues returns the cached vault values, refreshing them from the vault when the
+// TTL has lapsed. On a refresh failure it keeps the last good snapshot (fail-safe: the
+// guard never silently empties on a transient vault hiccup).
+func guardValues() []string {
+	valueGuardStore.mu.Lock()
+	defer valueGuardStore.mu.Unlock()
+	if valueGuardStore.vals != nil && time.Since(valueGuardStore.loadedAt) < valueGuardTTL {
+		return valueGuardStore.vals
+	}
+	ensureCredential()
+	cat, err := catalog.Select("auto", vault.NewRunner(), "")
+	if err == nil {
+		if v, e := vault.AllSecretValues(vault.NewRunner(), cat.Provider()); e == nil {
+			valueGuardStore.vals = v
+			valueGuardStore.loadedAt = time.Now()
+		} else {
+			dbg("guard refresh: %v", e)
+		}
+	} else {
+		dbg("guard select: %v", err)
+	}
+	return valueGuardStore.vals
+}
+
+// handleScan redacts text against every vault value the service can read and returns the
+// redacted text (the matched VALUES never cross the wire).
+func handleScan(text string) projection.Response {
+	red, n := seen.Redact(text, guardValues())
+	return projection.Response{OK: true, Found: n > 0, Redacted: red}
 }
 
 // handleVault runs a vault catalog operation with the SERVICE's credential on behalf of the
@@ -310,6 +367,9 @@ func handleVault(req projection.VaultRequest) projection.Response {
 		result, err = cat.ListFields(req.Item, req.Account, req.Vault)
 	case projection.VaultCreate:
 		result, err = catalog.CreateSecret(vault.NewRunner(), req.Account, req.Vault, req.Title, req.Fields)
+		if err == nil {
+			invalidateValueGuard() // guard the new secret without waiting for the TTL
+		}
 	default:
 		return projection.Response{Error: "unknown vault action: " + req.Action}
 	}

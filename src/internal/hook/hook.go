@@ -199,6 +199,21 @@ func (h *Handler) sessionValues(session string) []string {
 }
 
 func (h *Handler) handlePrompt(in Input) Output {
+	// Core invariant (always on, independent of BlockOnPromptSecret): a prompt must
+	// never carry a real vault secret value into the model's context. With the
+	// proactive guard, every vault value is preloaded into the session cache, so this
+	// blocks a pasted secret even when it matches no heuristic detector pattern. The
+	// detector scan below is the additional, tunable best-effort layer.
+	if h.knownInText(in.SessionID, in.Prompt) {
+		h.Last = Decision{Event: "UserPromptSubmit", Action: "block", Count: 1}
+		return Output{
+			Decision: "block",
+			Reason:   "secrets-guard: prompt contains a known vault secret value",
+			SystemMessage: "🛑 secrets-guard bloqueó el envío: el prompt contiene el valor de un secreto de tu bóveda. " +
+				"No pegues valores de secretos; usa su referencia (op://… / keeper://…) y deja que el hook lo resuelva al ejecutar.",
+		}
+	}
+
 	findings := h.eng.Scan(in.Prompt)
 	if len(findings) == 0 || !h.cfg.BlockOnPromptSecret {
 		h.Last = Decision{Event: "UserPromptSubmit", Action: "allow"}
