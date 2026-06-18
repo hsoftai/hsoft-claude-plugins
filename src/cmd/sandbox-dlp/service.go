@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/hsoftai/hsoft-claude-plugins/internal/projection"
 	"github.com/hsoftai/hsoft-claude-plugins/internal/vault"
@@ -38,16 +39,33 @@ type mounter interface {
 	Name() string
 }
 
+// reapInterval is how often the service checks for execs to reap (dead root process or
+// expired TTL).
+const reapInterval = 30 * time.Second
+
+// execEntry is the live state the service keeps per registered exec, so a reaper can tear
+// one down when its owning process dies (e.g. the sandbox CLI was hard-killed and never
+// got to deregister) or its TTL lapses — otherwise a stale mount and the secret's rendered
+// bytes would linger.
+type execEntry struct {
+	rootPID  int
+	token    string
+	deadline time.Time
+	cleanup  func() error
+}
+
 // Service owns the projection registry and the live per-exec mounts.
 type Service struct {
-	reg    *projection.Registry
-	mnt    mounter
-	mu     sync.Mutex
-	mounts map[string]func() error // execID -> unmount
+	reg   *projection.Registry
+	mnt   mounter
+	mu    sync.Mutex
+	execs map[string]*execEntry // execID -> live exec
 }
 
 func newService(m mounter) *Service {
-	return &Service{reg: projection.New(), mnt: m, mounts: map[string]func() error{}}
+	s := &Service{reg: projection.New(), mnt: m, execs: map[string]*execEntry{}}
+	go s.reapLoop()
+	return s
 }
 
 // handleRegister activates one exec: it mounts the projection (so reads can be served),
@@ -79,20 +97,78 @@ func (s *Service) handleRegister(req projection.RegisterRequest) projection.Resp
 		closeOracle(oracle)
 		return err
 	}
-	s.mu.Lock()
-	// Replace any prior mount for this exec id (deregister the old one).
-	if old := s.mounts[req.ExecID]; old != nil {
-		_ = old()
+	ttl := req.TTLSeconds
+	if ttl <= 0 {
+		ttl = 3600
 	}
-	s.mounts[req.ExecID] = cleanup
-	// Register in s.reg only after the cleanup is stored, and while still holding
-	// s.mu, so a concurrent handleDeregister that observes the exec in s.reg is
-	// guaranteed to find (and run) the corresponding cleanup. Otherwise a deregister
-	// racing between Apply and the store would close nothing, leaking the oracle's
-	// Job Object handle and the mount goroutine.
+	entry := &execEntry{
+		rootPID:  req.RootPID,
+		token:    req.Token,
+		deadline: time.Now().Add(time.Duration(ttl) * time.Second),
+		cleanup:  cleanup,
+	}
+	s.mu.Lock()
+	// Replace any prior mount for this exec id (tear down the old one).
+	if old := s.execs[req.ExecID]; old != nil && old.cleanup != nil {
+		_ = old.cleanup()
+	}
+	s.execs[req.ExecID] = entry
+	// Register in s.reg only after the entry is stored, and while still holding s.mu, so a
+	// concurrent handleDeregister (or the reaper) that observes the exec in s.reg is
+	// guaranteed to find (and run) the corresponding cleanup. Otherwise a teardown racing
+	// between Apply and the store would close nothing, leaking the oracle's Job Object
+	// handle and the mount goroutine.
 	req.Apply(s.reg, oracle)
 	s.mu.Unlock()
 	return projection.Response{OK: true}
+}
+
+// detachLocked removes the exec from the live set and returns its teardown closure and
+// token. Callers MUST hold s.mu, and MUST run the returned cleanup + reg.Deregister OUTSIDE
+// the lock (unmount drains in-flight reads and can block).
+func (s *Service) detachLocked(execID string) (cleanup func() error, token string, ok bool) {
+	e := s.execs[execID]
+	if e == nil {
+		return nil, "", false
+	}
+	delete(s.execs, execID)
+	return e.cleanup, e.token, true
+}
+
+// reapLoop periodically tears down execs whose owning process has died or whose TTL has
+// lapsed — covering a sandbox CLI that was hard-killed (SIGKILL/taskkill) and never
+// deregistered, which would otherwise leave a stale mount and the rendered bytes in RAM.
+func (s *Service) reapLoop() {
+	for {
+		time.Sleep(reapInterval)
+		s.reapOnce()
+	}
+}
+
+func (s *Service) reapOnce() {
+	now := time.Now()
+	type dead struct {
+		id, token string
+		cleanup   func() error
+	}
+	var reap []dead
+	s.mu.Lock()
+	for id, e := range s.execs {
+		if now.After(e.deadline) || !processAlive(e.rootPID) {
+			reap = append(reap, dead{id, e.token, e.cleanup})
+			delete(s.execs, id)
+		}
+	}
+	s.mu.Unlock()
+	// Tear down outside the lock: unmount (drains readers) FIRST, then scrub — same
+	// fail-closed ordering as handleDeregister.
+	for _, d := range reap {
+		if d.cleanup != nil {
+			_ = d.cleanup()
+		}
+		s.reg.Deregister(d.id, d.token)
+		dbg("reaped exec %s", d.id)
+	}
 }
 
 // handleDeregister ends an exec: it tears down the mount FIRST, then scrubs the rendered
@@ -111,12 +187,11 @@ func (s *Service) handleDeregister(req projection.DeregisterRequest) projection.
 		s.mu.Unlock()
 		return projection.Response{Error: "unknown exec or bad token"}
 	}
-	unmount := s.mounts[req.ExecID]
-	delete(s.mounts, req.ExecID)
+	cleanup, _, _ := s.detachLocked(req.ExecID)
 	s.mu.Unlock()
 	// Stop the filesystem (and drain in-flight reads) before scrubbing the secret bytes.
-	if unmount != nil {
-		_ = unmount()
+	if cleanup != nil {
+		_ = cleanup()
 	}
 	// Now no reader can observe the buffer; scrub it from RAM.
 	s.reg.Deregister(req.ExecID, req.Token)
