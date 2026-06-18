@@ -1,6 +1,6 @@
 ---
 name: using-vault-secrets
-description: How to use Keeper / 1Password secrets safely via secrets-guard, and how to migrate hardcoded secrets into the vault. Use whenever the user asks you to connect to something, use a password/API key/token/credential, or fill a secret into a file, command, or config; whenever you find a secret hardcoded in source/config/.env/Dockerfile/CI (offer to move it to the vault and refactor to a reference); and when launching an app that needs secrets (use `secrets-guard run`). Never ask the user to paste a secret value, and never write a secret value to disk — discover/keep the reference and let it resolve at runtime.
+description: How to use Keeper / 1Password secrets safely via secrets-guard, and how to migrate hardcoded secrets into the vault. Use whenever the user asks you to connect to something, use a password/API key/token/credential, or fill a secret into a file, command, or config; whenever the user asks what secrets/keys they have or to list/search/create a secret (use the MCP tools — list_secrets, search_secrets, list_fields, create_secret); whenever you find a secret hardcoded in source/config/.env/Dockerfile/CI (offer to move it to the vault and refactor to a reference); and when launching an app that needs secrets (just run it normally — the Bash hook renders the references for that command). Never ask the user to paste a secret value, never call the vault CLI (ksm/keeper/op) yourself, and never write a secret value to disk — discover/keep the reference and let it resolve at runtime.
 ---
 
 # Using vault secrets without ever seeing their values
@@ -19,6 +19,13 @@ value at execution time. You only ever see the reference.
    the tool call and let the hook resolve it.
 3. Put references verbatim into the tool that needs the secret (Write content,
    Bash command, config file). Do not modify them.
+4. **Never run the vault CLI yourself** (`ksm`, `keeper`, `op`, or `secrets-guard
+   read|run`) in a Bash command — the hook denies it. Only the secrets-guard
+   service holds the vault credential. To inspect or create secrets, use the **MCP
+   tools** (`list_secrets`, `search_secrets`, `list_fields`, `create_secret`,
+   `vault_status`); they run the operation through the service and return metadata
+   and references only — never a value. To *use* a secret, put its reference in a
+   `.env`/config or command and run the command normally (see "Running code").
 
 ## Workflow
 
@@ -39,6 +46,13 @@ key", "write the DB password into .env"):
      `limit` to size). Returns `total`/`returned`/`truncated`.
    - `list_fields` — list an item's fields and get the ready-to-use `reference`
      for each. Pass `account` and (if the title isn't unique) `vault`.
+   - `create_secret` — create a new record in the vault and get back its
+     reference. Pass `title`, the destination (`folder` — a Keeper Shared-Folder
+     UID the app can edit, or a 1Password `vault` name), and `fields`
+     (label→value, e.g. `{"login":"demo","password":"…"}`). The values are stored
+     in the vault through the service; only the new item's metadata + reference
+     come back. Use this instead of `op item create` / `ksm secret add` (those are
+     blocked, and the client has no credential).
 2. **Pick** the field the user means (e.g. the `password` of item `prod-db`).
 3. **Use** its `reference`. How depends on the tool — see below.
 
@@ -110,21 +124,36 @@ If a reference fails with `ref-not-approved`, write it as a `KEY=op://…` line 
 ## Running code that needs the secrets (the key pattern)
 
 Because `.env` files hold *references*, a normal app (`python-dotenv`, `godotenv`,
-node `dotenv`, etc.) would read the literal `op://…` string, not the value. The
-fix is to run the program through the resolver helper, which injects the real
-values as environment variables **into that process only** (never to disk):
+node `dotenv`, etc.) would read the literal `op://…` string, not the value. On a
+**kernel-DLP / sandbox host (Windows, Linux)** you do nothing special: just run the
+app's normal command in Bash and the PreToolUse hook renders every reference — in
+the environment **and** in files under the working directory (`.env`, config) —
+into real values that only **that command's process subtree** can read. Other
+processes, and the files on disk, still see the references. The value never lands
+on disk.
 
 ```sh
-secrets-guard run --env-file .env -- python app.py
-secrets-guard run --env-file .env -- node server.js
-secrets-guard run -- go run .         # resolves op://… already in the environment
+npm run dev            # the .env's keeper://… / op://… is served only to this subtree
+node server.js
+python app.py
+go run .
 ```
 
+Do **not** wrap these in `secrets-guard run` / `op run` / `ksm exec` yourself — on
+a sandbox host the hook already does the rendering, and it denies those resolving
+subcommands (only the service may touch the vault). Just run the command as the
+project normally would.
+
 Write the app to read config from the **environment** (12-factor):
-`os.environ["DB_PASSWORD"]` / `process.env.DB_PASSWORD` / `os.Getenv("DB_PASSWORD")`.
-Put the references in `.env`. Launch via `secrets-guard run`. The value lives only
-in the process's memory; the `.env` on disk keeps the reference. (This is the same
-idea as `op run` / `ksm exec`, unified across both vaults and the session guard.)
+`os.environ["DB_PASSWORD"]` / `process.env.DB_PASSWORD` / `os.Getenv("DB_PASSWORD")`,
+and put the references in `.env`. The value lives only in the process's memory; the
+`.env` on disk keeps the reference.
+
+**For the developer running it outside Claude Code** (or on a plain in-place macOS
+host), the portable manual command is `secrets-guard run --env-file .env -- <cmd>`
+(equivalently `op run --env-file=.env -- <cmd>` for 1Password or `ksm exec -- <cmd>`
+for Keeper). That is what goes in the README / `start.sh` for humans — you don't run
+it from inside Claude Code on a sandbox host.
 
 ## Found a hardcoded secret? Offer to migrate it to the vault
 
@@ -142,30 +171,23 @@ and variable but not the value) and handle the value only through shell pipes.
 
 If the user accepts:
 
-1. **Add it to the vault — without the value passing through this chat.** Run a
-   Bash command that reads the value straight from the file and pipes it into the
-   vault CLI, so the value flows file → vault, never into the conversation. The
-   vault will likely prompt the developer for permission (Touch ID) — that's
-   expected; tell them to approve it.
-   - 1Password — extract into a shell variable (never echo it; never paste the
-     literal value into the command), then create the item. In a Bash tool call
-     there is no interactive shell history, so a `$var` expansion is safe; the
-     value flows file → variable → `op`, not through this chat:
-     ```sh
-     val="$(grep -oE 'sk-[A-Za-z0-9_]+' src/config.py | head -1)"   # extract; never echo it
-     op item create --category password --title "myapp-db" --vault "Private" \
-       "password=$val" --format json >/dev/null
-     unset val
-     ```
-     Then the reference is `op://Private/myapp-db/password` (confirm with
-     `list_fields`). Check `op item create --help` for the right category/fields
-     (e.g. `--category "API Credential"` with `credential=…`) if it isn't a plain
-     password.
-   - Keeper: KSM is read-oriented; if `ksm` can't create the record, tell the
-     user to add it in the 1Password/Keeper app (or Keeper Commander
-     `record-add`), then use `list_secrets`/`list_fields` to get the reference.
-2. **Get the reference** with `list_fields` (it returns the ready-to-use,
-   account-prefixed `op://…`).
+1. **Add it to the vault with the `create_secret` MCP tool** (the service writes
+   it with its credential; you never call the vault CLI). Pass a `title`, the
+   destination (`folder` = a Keeper Shared-Folder UID the app can edit, or a
+   1Password `vault` name) and the `fields` (label→value). The tool returns the new
+   item's metadata and reference.
+   - **Migrating an existing value:** secrets-guard withholds/denies a real
+     detected secret in a tool input, so you usually can't paste the existing value
+     into `create_secret`. Treat the migration as a **rotation**: create the record
+     with a freshly generated value, point the app at the reference, and tell the
+     user to update the upstream service with the new value (the old one was in
+     plaintext/possibly committed, so it should be rotated anyway). If the value
+     must be preserved verbatim, ask the user to add the record in the Keeper /
+     1Password app, then continue from `list_fields`.
+   - **New secret:** pass the value directly in `fields` (e.g.
+     `{"password":"<generated>"}`).
+2. **Get the reference** — `create_secret` returns it; otherwise `list_fields`
+   returns the ready-to-use, account-prefixed reference.
 3. **Refactor** (see rules below).
 4. **Verify** the app still starts and behaves the same.
 5. Remind the user to **rotate** the secret if it was ever committed to git.
@@ -211,7 +233,10 @@ secret comes from** (vault instead of hardcode) and **how the app is launched**.
 
 ## Startup patterns by ecosystem (maximize compatibility)
 
-The app reads from env; only the launcher resolves references. Pick what fits:
+The app reads from env; only the launcher resolves references. These are the
+commands the **developer** runs manually / puts in the README or `start.sh` — inside
+Claude Code on a sandbox host you just run the bare command (`node server.js`) and
+the hook renders the references. Pick what fits:
 
 - **npm/Node:** add a script — `"start:secure": "secrets-guard run --env-file .env -- node server.js"`.
 - **Python:** `secrets-guard run --env-file .env -- gunicorn app:app` (or uvicorn,

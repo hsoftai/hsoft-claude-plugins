@@ -12,11 +12,13 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"sync"
 	"time"
 
+	"github.com/hsoftai/hsoft-claude-plugins/internal/catalog"
 	"github.com/hsoftai/hsoft-claude-plugins/internal/projection"
 	"github.com/hsoftai/hsoft-claude-plugins/internal/vault"
 )
@@ -275,7 +277,48 @@ func dispatchControl(s *Service, req projection.ControlRequest) projection.Respo
 		return s.handleDeregister(*req.Deregister)
 	case projection.OpStatus:
 		return projection.Response{OK: true, Active: s.activeExecs(), Driver: s.mnt.Name()}
+	case projection.OpVault:
+		if req.Vault == nil {
+			return projection.Response{Error: "missing vault payload"}
+		}
+		return handleVault(*req.Vault)
 	default:
 		return projection.Response{Error: "unknown op"}
 	}
+}
+
+// handleVault runs a vault catalog operation with the SERVICE's credential on behalf of the
+// MCP, returning metadata/references as JSON — never a secret value. This is how the model
+// lists and creates secrets without the client/agent ever holding the vault credential.
+func handleVault(req projection.VaultRequest) projection.Response {
+	ensureCredential() // provision KSM_CONFIG into this process (Windows); no-op elsewhere
+	cat, err := catalog.Select("auto", vault.NewRunner(), "")
+	if err != nil {
+		return projection.Response{Error: err.Error()}
+	}
+	var result any
+	switch req.Action {
+	case projection.VaultProvider:
+		result = map[string]any{"available": true, "provider": cat.Provider()}
+	case projection.VaultAccounts:
+		result, err = cat.ListAccounts()
+	case projection.VaultVaults:
+		result, err = cat.ListVaults(req.Account)
+	case projection.VaultItems:
+		result, err = cat.ListItems(req.Account, req.Vault)
+	case projection.VaultFields:
+		result, err = cat.ListFields(req.Item, req.Account, req.Vault)
+	case projection.VaultCreate:
+		result, err = catalog.CreateSecret(vault.NewRunner(), req.Account, req.Vault, req.Title, req.Fields)
+	default:
+		return projection.Response{Error: "unknown vault action: " + req.Action}
+	}
+	if err != nil {
+		return projection.Response{Error: err.Error()}
+	}
+	payload, merr := json.Marshal(result)
+	if merr != nil {
+		return projection.Response{Error: merr.Error()}
+	}
+	return projection.Response{OK: true, Payload: payload}
 }

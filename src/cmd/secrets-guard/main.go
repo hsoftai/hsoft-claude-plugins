@@ -218,7 +218,10 @@ func runMCP() {
 	cfg := config.Load(os.Getenv)
 
 	cat := func() (catalog.Catalog, error) {
-		return catalog.Select(cfg.VaultProvider, vault.NewRunner(), cfg.OPAccount)
+		// On the Windows kernel-DLP path the client holds no vault credential — only the
+		// sandbox-dlp service does — so catalog operations are proxied to it. Elsewhere the
+		// local vault is used directly.
+		return mcpCatalog(cfg)
 	}
 	jsonText := func(v any) (string, error) {
 		b, err := json.MarshalIndent(v, "", "  ")
@@ -383,6 +386,38 @@ func runMCP() {
 					return "", err
 				}
 				return jsonText(fields)
+			},
+		},
+		{
+			Name: "create_secret",
+			Description: "Create a new secret in the vault and return its reference (op:// / keeper://) — never a value. Use it to store a credential the user provides or one you generate, then put the returned reference into a config/.env. For Keeper, 'folder' is the destination Shared-Folder UID (from list_secrets/list_fields; the application must have edit access). For 1Password it is the vault name. 'fields' maps field labels to values (e.g. {\"login\":\"user\",\"password\":\"...\"}); values are stored in the vault and never returned.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"folder": map[string]any{"type": "string", "description": "Keeper: destination Shared-Folder UID (the app needs edit access). 1Password: vault name."},
+					"title":  map[string]any{"type": "string", "description": "Title for the new record."},
+					"fields": map[string]any{"type": "object", "description": "Field label -> value (e.g. login, password, url)."},
+				},
+				"required": []any{"folder", "title"},
+			},
+			Handler: func(args map[string]any) (string, error) {
+				dest, title := argStr(args, "folder"), argStr(args, "title")
+				if dest == "" || title == "" {
+					return "", fmt.Errorf("missing required argument 'folder' or 'title'")
+				}
+				fields := map[string]string{}
+				if f, ok := args["fields"].(map[string]any); ok {
+					for k, v := range f {
+						if sv, ok := v.(string); ok {
+							fields[k] = sv
+						}
+					}
+				}
+				it, err := createSecret(cfg, dest, title, fields)
+				if err != nil {
+					return "", err
+				}
+				return jsonText(it)
 			},
 		},
 	}

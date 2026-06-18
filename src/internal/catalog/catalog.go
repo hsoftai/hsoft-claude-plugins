@@ -312,3 +312,53 @@ func (k *keeperCat) ListFields(item, _, _ string) ([]Field, error) {
 	}
 	return fields, nil
 }
+
+// CreateSecret creates a new record in the vault and returns its catalog Item (with the
+// reference-ready id). For Keeper, dest is the destination Shared-Folder UID — the KSM
+// application must have edit access to it; for 1Password it is the vault name. fields maps
+// each field label to its value; the value is STORED in the vault and never flows back to
+// the caller beyond the created item's metadata. Runs with whatever credential the caller's
+// runner exposes (the service's, in practice), so the client never needs vault access.
+func CreateSecret(r vault.Runner, account, dest, title string, fields map[string]string) (Item, error) {
+	if title == "" || dest == "" {
+		return Item{}, fmt.Errorf("title and destination folder/vault are required")
+	}
+	if flagLike(dest) || flagLike(title) {
+		return Item{}, fmt.Errorf("invalid destination or title")
+	}
+	switch {
+	case r.Look("ksm"):
+		args := []string{"secret", "add", "field", "--sf", dest, "--rt", "login", "-t", title}
+		for label, val := range fields {
+			if flagLike(label) {
+				return Item{}, fmt.Errorf("invalid field label %q", label)
+			}
+			args = append(args, label+"="+val) // "label=value" is positional, never a flag
+		}
+		if _, err := r.Run("ksm", args...); err != nil {
+			return Item{}, err
+		}
+		// Re-list to return the new record's UID (and thus its keeper:// reference).
+		items, _ := (&keeperCat{r: r}).ListItems("", "")
+		for _, it := range items {
+			if it.Title == title {
+				return it, nil
+			}
+		}
+		return Item{Title: title, Type: "login"}, nil
+	case r.Look("op"):
+		args := []string{"item", "create", "--category", "login", "--title", title, "--vault", dest, "--format", "json"}
+		for label, val := range fields {
+			if flagLike(label) {
+				return Item{}, fmt.Errorf("invalid field label %q", label)
+			}
+			args = append(args, label+"="+val)
+		}
+		if _, err := r.Run("op", args...); err != nil {
+			return Item{}, err
+		}
+		return Item{Title: title, Type: "login"}, nil
+	default:
+		return Item{}, fmt.Errorf("no vault available to create a secret")
+	}
+}

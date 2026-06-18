@@ -49,13 +49,17 @@ type DeregisterRequest struct {
 	Token  string `json:"token"`
 }
 
-// Response is the provider's reply to either request.
+// Response is the provider's reply to a request.
 type Response struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
 	// Status fields (populated only for an OpStatus reply).
 	Active int    `json:"active,omitempty"` // number of projected execs
 	Driver string `json:"driver,omitempty"` // backing FUSE driver name
+	// Payload carries an OpVault result as JSON (vault metadata / references — NEVER
+	// secret values), so the MCP can list and create secrets through the service (the
+	// only holder of the vault credential) instead of reaching the vault itself.
+	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
 // Control ops carried by a ControlRequest envelope (one JSON object per connection).
@@ -63,7 +67,31 @@ const (
 	OpRegister   = "register"
 	OpDeregister = "deregister"
 	OpStatus     = "status"
+	OpVault      = "vault"
 )
+
+// Vault sub-actions (the catalog operation the service runs with ITS credential). All
+// return metadata or references only — never a secret value.
+const (
+	VaultProvider = "provider"
+	VaultAccounts = "accounts"
+	VaultVaults   = "vaults"
+	VaultItems    = "items"
+	VaultFields   = "fields"
+	VaultCreate   = "create"
+)
+
+// VaultRequest asks the service to run a read/metadata (or create) catalog operation with
+// its own vault credential, on behalf of the MCP. No secret value ever flows back — only
+// titles, ids, types, and ready-to-use references.
+type VaultRequest struct {
+	Action  string            `json:"action"`
+	Account string            `json:"account,omitempty"`
+	Vault   string            `json:"vault,omitempty"`
+	Item    string            `json:"item,omitempty"`
+	Title   string            `json:"title,omitempty"`  // create
+	Fields  map[string]string `json:"fields,omitempty"` // create: label -> value reference is NOT used; values are provided by the caller only for create
+}
 
 // ControlRequest is the single message the client sends on a control connection. Op
 // selects which payload is present.
@@ -71,6 +99,7 @@ type ControlRequest struct {
 	Op         string             `json:"op"`
 	Register   *RegisterRequest   `json:"register,omitempty"`
 	Deregister *DeregisterRequest `json:"deregister,omitempty"`
+	Vault      *VaultRequest      `json:"vault,omitempty"`
 }
 
 // tokenBytes is the size of a one-time token before base64 (256 bits).
