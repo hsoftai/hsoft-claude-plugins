@@ -10,6 +10,20 @@ Paths:
 - Linux: `/etc/claude-code/managed-settings.json`
 - Windows: `C:\ProgramData\ClaudeCode\managed-settings.json`
 
+## Windows one-shot enforcement script
+
+On Windows you can write the managed file (and disable "bypass permissions" mode) in one
+step with `installers/windows/enforce-secrets-guard.ps1`. It self-elevates and writes
+`C:\ProgramData\ClaudeCode\managed-settings.json`. Download and run it on the target machine:
+
+```powershell
+powershell -ExecutionPolicy Bypass -Command "iwr -UseBasicParsing https://raw.githubusercontent.com/hsoftai/hsoft-claude-plugins/main/installers/windows/enforce-secrets-guard.ps1 -OutFile $env:TEMP\enforce-secrets-guard.ps1; & $env:TEMP\enforce-secrets-guard.ps1"
+```
+
+Pass `-KsmConfig '<base64>'` to embed the Keeper credential, or leave it out to let the
+`sandbox-dlp` service ingest the local `ksm` profile. For per-process file rendering also
+run `installers/windows/sandbox-dlp-setup.ps1` (installs WinFsp + the service).
+
 ## Full enforcement example
 
 ```json
