@@ -175,9 +175,48 @@ are in the subtree.
   unknown handle), darwin keeps the validated live-`Getcontext` path. This is why
   `FspFileSystemOperationProcessId()` was NOT wired in — it carries the same token PID that
   WinFsp omits during `Read`.
-- **Caching off for per-read gating.** `fuseMountOpts` adds `-o direct_io` (plus the
-  `*Timeout=0` options) so every read reaches the handler and one process's read is never
-  served from another's cached bytes.
+- **Caching / per-read gating.** `fuseMountOpts` uses `*Timeout=0` (no metadata cache).
+  `-o direct_io` was tried but removed: it disables the cache Windows needs to memory-map
+  image sections, so DLL / native-addon (`.node`) loads from the mount fail with
+  ACCESS_DENIED and real toolchains (Next.js/SWC) can't run. The per-read gate holds anyway
+  because the read handler resolves the caller per file-handle on every read (validated by
+  the per-process test, run repeatedly with no cross-process leak).
+- **Drive-letter mountpoint.** The client mounts on an unused drive letter (e.g. `Z:`), not
+  a temp directory: a directory mount is a reparse point and Windows refuses to memory-map
+  image sections from it (native modules fail to load), whereas a drive volume works. See
+  `dlp_mount_windows.go`.
+- **Real toolchains run under the mount.** The projection is a read-write loopback: writes
+  to ordinary files pass through to the backing (errno-accurate), so `next dev` etc. work;
+  writes/renames/removes of a declared ref-file are refused so the rendered value can never
+  be persisted and the reference file is never modified through the mount.
+
+## Credential isolation (Windows) — only the service can reach the vault
+
+The point of the sandbox is defeated if any process can resolve secrets directly (a bare
+`ksm secret notation …` / `op read …`). Two layers keep the vault reachable ONLY through
+the plugin, configured automatically with no manual step:
+
+- **The service is the sole credential holder.** Resolution moved from the client to the
+  `sandbox-dlp` service: the client (`dlpRender`) sends only the ref-file PATHS; the service
+  reads each backing file, resolves its references with its OWN credential, and serves the
+  rendered bytes solely to the command's subtree — the plaintext value is produced only
+  inside the service and never travels back over the control channel. The client holds no
+  credential and never resolves on the Windows kernel-DLP path.
+- **Auto-ingest + global-profile removal.** On startup the service provisions `KSM_CONFIG`
+  into its OWN process environment (private to the process) from, in order: an externally
+  provided `KSM_CONFIG` (MDM), its DPAPI-encrypted store, or a one-time export of the local
+  `ksm` profile. After verifying the credential resolves and persisting a user-DPAPI-
+  encrypted copy, it DELETES the global `ksm` profile from the OS Credential Manager (the
+  delete must run with `KSM_CONFIG` unset, or `ksm` operates on the env config and the
+  keyring profile survives). A bare `ksm` by any other process — including the agent — then
+  fails ("Keeper SDK client has not been loaded"). See `credential_windows.go`.
+- **Hook denial (defense in depth).** The plugin's `PreToolUse` hook denies any Bash command
+  that invokes a vault CLI (`ksm`/`keeper`/`op`) or `secrets-guard read|run` directly, so
+  the model is told to use a reference and let the sandbox render it.
+- **Residual (same-user, by design choice).** The service runs as the user, so its DPAPI
+  store is decryptable by a determined same-user process; the chosen level removes the easy
+  global profile and the agent's direct-CLI path. A separate low-privilege service account
+  would close the same-user residual.
 - **Synchronous mount.** `fuseMounter.Mount` now blocks (`waitMountReady`) until the
   mountpoint answers a directory listing before returning, so a client that `chdir`s into
   the mountpoint right after a successful `Register` never races the async WinFsp mount.

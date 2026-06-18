@@ -12,7 +12,11 @@ import (
 	"github.com/hsoftai/hsoft-claude-plugins/internal/projection"
 )
 
-const callTimeout = 5 * time.Second
+// callTimeout bounds one control round-trip. A register makes the service resolve the
+// ref-files (vault CLI calls) and bring up the mount, which can take several seconds, so
+// the deadline is generous; a status check still returns immediately (and a down service
+// fails fast at Dial, not here).
+const callTimeout = 30 * time.Second
 
 // Call dials the service, sends one control request, and returns the response. It is the
 // only entry point the secrets-guard CLI needs.

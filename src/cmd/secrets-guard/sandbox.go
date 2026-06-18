@@ -183,8 +183,12 @@ func renderAndExec(cfg config.Config, cmd []string, withFiles bool) {
 	// Resolve the unescaped references (if any). The render pass runs regardless, so
 	// that an escaped occurrence (\op://…) still has its backslash stripped — matching
 	// the inline `command_references` escape — even when nothing needs fetching.
+	// In the Windows kernel-DLP path the CLIENT holds no vault credential and does NOT
+	// resolve: references in ref-files are resolved by the sandbox-dlp SERVICE (which owns
+	// the credential) and served only to the command's subtree. Env/command references are
+	// left literal there. On every other path the client resolves locally as before.
 	var values map[string]string
-	if len(refs) > 0 {
+	if len(refs) > 0 && !kernelDLPActive(cfg) {
 		var err error
 		values, err = sandboxResolve(cfg, refs)
 		if err != nil {
@@ -218,7 +222,7 @@ func renderAndExec(cfg config.Config, cmd []string, withFiles bool) {
 	childDir := ""
 	if withFiles && len(files) > 0 {
 		if kernelDLPActive(cfg) {
-			if mp, dereg, ok := dlpRender(files, values); ok {
+			if mp, dereg, ok := dlpRender(files); ok {
 				restore, childDir = dereg, mp
 			} else if cfg.KernelDLP == "require" {
 				fmt.Fprintln(os.Stderr, "secrets-guard sandbox: sandbox-dlp no disponible; "+

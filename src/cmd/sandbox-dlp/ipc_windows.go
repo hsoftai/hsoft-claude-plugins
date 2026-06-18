@@ -15,7 +15,11 @@ import (
 	"github.com/hsoftai/hsoft-claude-plugins/internal/projection"
 )
 
-const controlConnTimeout = 5 * time.Second
+// controlConnTimeout bounds one control connection. A register resolves the ref-files
+// (vault CLI calls) and brings up the mount, so it can take several seconds; the deadline
+// must exceed that or the service would close the connection mid-register and the client
+// would fail closed even though the mount came up.
+const controlConnTimeout = 30 * time.Second
 
 // runServe hosts the control named pipe (per-user Windows service entrypoint). The pipe
 // is created with an owner-only ACL, so only the same user's processes can connect —
@@ -36,6 +40,10 @@ func runServe() {
 		fmt.Fprintln(os.Stderr, "sandbox-dlp serve:", err)
 		os.Exit(1)
 	}
+	// Ingest the vault credential into this service ONCE at startup (export the local ksm
+	// profile into the DPAPI store and remove the global profile), off the register hot
+	// path — so the first register is not slowed by the one-time credential setup.
+	ensureCredential()
 	s := newService(newMounter())
 	fmt.Fprintf(os.Stderr, "sandbox-dlp: serving on %s (driver=%s)\n", pipe, s.mnt.Name())
 	for {

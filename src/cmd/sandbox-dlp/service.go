@@ -13,10 +13,20 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"sync"
 
 	"github.com/hsoftai/hsoft-claude-plugins/internal/projection"
+	"github.com/hsoftai/hsoft-claude-plugins/internal/vault"
 )
+
+// dbg writes a diagnostic line to stderr when SG_DLP_DEBUG is set (never logs secret
+// values, only resolution metadata).
+func dbg(format string, args ...any) {
+	if os.Getenv("SG_DLP_DEBUG") != "" {
+		fmt.Fprintf(os.Stderr, "[dlp] "+format+"\n", args...)
+	}
+}
 
 // mounter mounts a per-exec projection backed by the real project root. Reads of
 // declared ref-files are answered by reg.Resolve (rendered for the subtree, original
@@ -46,6 +56,13 @@ func newService(m mounter) *Service {
 func (s *Service) handleRegister(req projection.RegisterRequest) projection.Response {
 	if err := req.Validate(); err != nil {
 		return projection.Response{Error: err.Error()}
+	}
+	// Resolve any ref-files the client sent as PATHS ONLY (no pre-rendered content): the
+	// value is computed HERE, with the service's own credential, and served only to the
+	// subtree — it is never resolved on the client and never returned over the control
+	// channel. Files that already carry content (dev/tests) are left as-is. Fail-closed.
+	if err := resolveFiles(&req); err != nil {
+		return projection.Response{Error: fmt.Sprintf("resolve: %v", err)}
 	}
 	// Build the subtree oracle BEFORE the command is spawned so the root process is
 	// already placed in its Job Object (Windows) and the command inherits it on spawn.
@@ -104,6 +121,55 @@ func (s *Service) handleDeregister(req projection.DeregisterRequest) projection.
 	// Now no reader can observe the buffer; scrub it from RAM.
 	s.reg.Deregister(req.ExecID, req.Token)
 	return projection.Response{OK: true}
+}
+
+// resolveFiles renders any ref-file that arrived without pre-rendered content, using the
+// service's own vault credential. The client sends only the file PATH (under the backing
+// root); the service reads it, resolves its references, and stores the rendered bytes —
+// so the plaintext value is produced only inside the service and served solely to the
+// authorized subtree. Files that already carry content are untouched (dev/tests).
+func resolveFiles(req *projection.RegisterRequest) error {
+	need := false
+	for i := range req.Files {
+		if len(req.Files[i].Content) == 0 {
+			need = true
+			break
+		}
+	}
+	if !need {
+		return nil
+	}
+	ensureCredential() // provision KSM_CONFIG into this process (Windows); no-op elsewhere
+	resolver, err := vault.Select("auto", vault.NewRunner(), "")
+	if err != nil {
+		return err
+	}
+	dbg("resolveFiles: provider=%v ksmcfg=%v", func() string {
+		if resolver == nil {
+			return "nil"
+		}
+		return resolver.ProviderName()
+	}(), os.Getenv("KSM_CONFIG") != "")
+	if resolver == nil || resolver.ProviderName() == "none" {
+		return fmt.Errorf("no vault credential available in the service")
+	}
+	for i := range req.Files {
+		if len(req.Files[i].Content) > 0 {
+			continue
+		}
+		raw, err := os.ReadFile(req.Files[i].Path)
+		if err != nil {
+			return fmt.Errorf("read ref-file %q: %w", req.Files[i].Path, err)
+		}
+		rendered, _, rerr := resolver.ResolveString(string(raw))
+		if rerr != nil {
+			dbg("resolveFiles: ResolveString error: %v", rerr)
+			return rerr
+		}
+		dbg("resolveFiles: rendered %q changed=%v", req.Files[i].Path, rendered != string(raw))
+		req.Files[i].Content = []byte(rendered)
+	}
+	return nil
 }
 
 // closeOracle releases any OS resources an oracle owns (e.g. the Windows Job Object

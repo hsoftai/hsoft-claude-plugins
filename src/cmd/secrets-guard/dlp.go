@@ -51,27 +51,25 @@ func shortTmp() string {
 // per-exec mountpoint to run the command in, plus a deregister/cleanup function. ok is
 // false when the service is unavailable or rejects the registration; the caller then
 // decides the fallback (fail-closed for kernel_dlp=require, in-place for auto).
-func dlpRender(files []refFile, values map[string]string) (mountpoint string, deregister func(), ok bool) {
+func dlpRender(files []refFile) (mountpoint string, deregister func(), ok bool) {
 	if !dlpipc.Healthy() {
 		return "", nil, false
 	}
-	// Compute the rendered content for each ref-file (escape-aware). Files with no
-	// resolvable reference right now are left out (served straight from the backing).
+	// Send only the PATHS of ref-files that contain a reference; the CLIENT does not
+	// resolve and holds no vault credential. The sandbox-dlp service reads each backing
+	// file, resolves its references with its own credential, and serves the rendered bytes
+	// solely to this command's subtree — so the value is produced only inside the service,
+	// never on the client, and never travels back over the control channel.
 	var rf []projection.RenderedFile
 	for _, f := range files {
-		orig, err := os.ReadFile(f.path)
-		if err != nil {
-			continue
-		}
-		rendered := renderRefs(string(orig), values)
-		if rendered == string(orig) {
-			continue
+		if len(f.refs) == 0 {
+			continue // no reference -> nothing for the service to render
 		}
 		abs, err := filepath.Abs(f.path)
 		if err != nil {
 			continue
 		}
-		rf = append(rf, projection.RenderedFile{Path: abs, Content: []byte(rendered)})
+		rf = append(rf, projection.RenderedFile{Path: abs}) // Content empty: the service resolves
 	}
 	if len(rf) == 0 {
 		return "", nil, false
