@@ -296,6 +296,20 @@ func (h *Handler) handlePreTool(in Input) Output {
 		var m map[string]any
 		if json.Unmarshal(in.ToolInput, &m) == nil {
 			if cmd, ok := m["command"].(string); ok && cmd != "" {
+				// 1.5) The model must not resolve secrets itself: deny a command that
+				// invokes the vault CLI (ksm/keeper/op) or `secrets-guard read|run`
+				// directly. Only the sandbox-dlp service holds the vault credential and
+				// renders references into the per-command mount; a direct CLI call would
+				// pull plaintext values into the model's reach. (Defense in depth — the
+				// credential is also withheld from every process but the service.)
+				if reason, blocked := blockedVaultCLI(cmd); blocked {
+					h.Last = Decision{Event: "PreToolUse", Action: "deny"}
+					return Output{HookSpecificOutput: &HookSpecificOutput{
+						HookEventName:            "PreToolUse",
+						PermissionDecision:       "deny",
+						PermissionDecisionReason: reason,
+					}}
+				}
 				// Sandbox: wrap the WHOLE command in `secrets-guard sandbox`, which
 				// renders vault references — in the environment AND in files under the
 				// working directory — into real values inside an ephemeral per-command
@@ -566,6 +580,30 @@ func (h *Handler) processBashCommand(cmd string) (newCmd string, refs []string, 
 		return resolved
 	})
 	return out, refs, vals, injectErr
+}
+
+// vaultCLIRe matches a direct invocation of a vault CLI (Keeper's ksm/keeper-ksm,
+// Keeper Commander, or 1Password's op) at a command position, followed by a subcommand
+// that reads or manages secrets. The model must never call these itself — only the
+// sandbox-dlp service may resolve references.
+var vaultCLIRe = regexp.MustCompile(`(?i)(?:^|[\s;&|(` + "`" + `])(?:ksm|keeper-ksm|keeper|op)\s+(?:secret|profile|read|item|inject|get|notation|list|exec|init|run)\b`)
+
+// sgResolveRe matches `secrets-guard read|run`, the CLI subcommands that themselves
+// resolve a reference to a value (the sandbox path uses `secrets-guard sandbox`, which is
+// not matched).
+var sgResolveRe = regexp.MustCompile(`(?i)\bsecrets-guard\s+(?:read|run)\b`)
+
+// blockedVaultCLI reports whether cmd invokes a vault CLI (or secrets-guard's resolving
+// subcommands) directly, and the reason to return to the model.
+func blockedVaultCLI(cmd string) (string, bool) {
+	if vaultCLIRe.MatchString(cmd) || sgResolveRe.MatchString(cmd) {
+		return "secrets-guard: no ejecutes el CLI de la bóveda (ksm/keeper/op) ni " +
+			"`secrets-guard read|run` directamente — solo el servicio sandbox-dlp tiene la " +
+			"credencial y resuelve secretos, sirviéndolos únicamente al subárbol del comando. " +
+			"Usa la referencia (op://… / keeper://…) en un archivo de configuración y deja que " +
+			"el sandbox la renderice al ejecutar el comando.", true
+	}
+	return "", false
 }
 
 // sandboxWrapCommand wraps an entire Bash command in `secrets-guard sandbox`, which

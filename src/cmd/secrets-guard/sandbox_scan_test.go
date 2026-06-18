@@ -36,7 +36,7 @@ func TestScanRefFiles(t *testing.T) {
 	var got []string
 	for _, f := range files {
 		rel, _ := filepath.Rel(root, f.path)
-		got = append(got, rel)
+		got = append(got, filepath.ToSlash(rel)) // compare with "/" on every OS
 	}
 	sort.Strings(got)
 

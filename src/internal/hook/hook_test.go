@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -11,6 +12,15 @@ import (
 	"github.com/hsoftai/hsoft-claude-plugins/internal/redact"
 	"github.com/hsoftai/hsoft-claude-plugins/internal/seen"
 )
+
+// skipLedgerOnWindows marks tests that depend on the internal/seen ledger, whose
+// directory + ownership model is Unix-specific (TMPDIR, per-uid, 0700/owner). On Windows
+// the ledger uses a different location/ACL model, so these scenarios don't apply.
+func skipLedgerOnWindows(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("depends on the Unix internal/seen ledger (TMPDIR/per-uid/0700); not applicable on Windows")
+	}
+}
 
 // TestMain isolates the per-session ledger (internal/seen) to a temp dir.
 func TestMain(m *testing.M) {
@@ -175,10 +185,12 @@ func TestPreToolUse_ResolvesVaultReference(t *testing.T) {
 	}
 }
 
-// A command that itself resolves a reference (op read, ksm notation, …) must
-// keep the reference LITERAL — injecting the value would break it. The value is
-// still resolved internally (tracked) so the command's output can be redacted.
-func TestPreToolUse_VaultResolverCommandKeepsReference(t *testing.T) {
+// The model must not resolve a secret itself: a command that invokes the vault CLI
+// directly (op read, ksm secret notation, …) is DENIED. Only the sandbox-dlp service
+// holds the vault credential and resolves references, serving the value solely to the
+// command's own subtree — so a direct CLI call can never pull a plaintext value into the
+// model's reach.
+func TestPreToolUse_VaultCLIDirectlyDenied(t *testing.T) {
 	cfg := defaultCfg()
 	cfg.ToolOutputMode = "off" // isolate from output wrapping
 	h := newHandler(cfg)
@@ -187,15 +199,24 @@ func TestPreToolUse_VaultResolverCommandKeepsReference(t *testing.T) {
 		ToolName:      "Bash",
 		ToolInput:     json.RawMessage(`{"command":"op read \"op://Employee/test-claude/password\""}`),
 	})
-	// No command rewrite (reference kept), but tracked internally for redaction.
-	if out.HookSpecificOutput != nil && len(out.HookSpecificOutput.UpdatedInput) > 0 {
-		t.Fatalf("op read must keep the reference, got rewrite %+v", out.HookSpecificOutput)
+	if h.Last.Action != "deny" {
+		t.Fatalf("expected deny for a direct vault CLI command, got %q", h.Last.Action)
 	}
-	if h.Last.Action != "track" {
-		t.Fatalf("expected internal tracking (action=track), got %q", h.Last.Action)
+	if out.HookSpecificOutput == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("expected a deny decision, got %+v", out.HookSpecificOutput)
 	}
-	if h.Last.Count == 0 {
-		t.Fatalf("reference should have been resolved internally for redaction")
+}
+
+// ksm enumeration (the model trying to list vault entries) is likewise denied.
+func TestPreToolUse_VaultCLIListDenied(t *testing.T) {
+	h := newHandler(defaultCfg())
+	out := h.Handle(Input{
+		HookEventName: "PreToolUse",
+		ToolName:      "Bash",
+		ToolInput:     json.RawMessage(`{"command":"ksm secret list"}`),
+	})
+	if out.HookSpecificOutput == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("expected deny for `ksm secret list`, got %+v", out.HookSpecificOutput)
 	}
 }
 
@@ -303,6 +324,7 @@ func TestPostToolUse_CoworkModeBlocksBashLeak(t *testing.T) {
 // (confused-deputy exfiltration). Only executed Bash commands and env-file writes
 // authorize references.
 func TestPreToolUse_CoworkAllowlistLeastPrivilege(t *testing.T) {
+	skipLedgerOnWindows(t)
 	cfg := defaultCfg()
 	cfg.CoworkMode = true
 	sess := "ctf1-" + t.Name()
@@ -402,6 +424,7 @@ func TestPreToolUse_WrapsBashOutputInRedactMode(t *testing.T) {
 // (host has the CLI) and blocks the echoed value. noopCache forces the seen
 // fallback path.
 func TestPostToolUse_CoworkBackstopViaSeenLedger(t *testing.T) {
+	skipLedgerOnWindows(t)
 	cfg := defaultCfg()
 	cfg.CoworkMode = true
 	h := newHandler(cfg) // fakeResolver resolves any ref to RESOLVED_SECRET; noopCache
@@ -425,6 +448,7 @@ func TestPostToolUse_CoworkBackstopViaSeenLedger(t *testing.T) {
 // in ephemeral memory) and still block a value secrets-guard resolved this session.
 // Without the asymmetric cache-hit-only trust, the value would round-trip to the model.
 func TestPostToolUse_AmnesiacCacheStillBlocksViaSeenLedger(t *testing.T) {
+	skipLedgerOnWindows(t)
 	cfg := defaultCfg() // redact mode, local
 	eng := detect.New()
 	h := NewHandler(cfg, eng, redact.New(eng), fakeResolver{value: "RESOLVED_SECRET"}, amnesiacCache{}, "/opt/sg/bin/secrets-guard")
@@ -444,6 +468,7 @@ func TestPostToolUse_AmnesiacCacheStillBlocksViaSeenLedger(t *testing.T) {
 // Companion PreToolUse check: the known-value DENY must likewise survive an
 // amnesiac cache, corroborating the input against the durable seen ledger.
 func TestPreToolUse_AmnesiacCacheStillDeniesKnownValue(t *testing.T) {
+	skipLedgerOnWindows(t)
 	cfg := defaultCfg()
 	eng := detect.New()
 	h := NewHandler(cfg, eng, redact.New(eng), fakeResolver{value: "RESOLVED_SECRET"}, amnesiacCache{}, "/opt/sg/bin/secrets-guard")

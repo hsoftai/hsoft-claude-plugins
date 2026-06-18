@@ -1,3 +1,8 @@
+//go:build !windows
+
+// These tests exercise the cache daemon's UNIX-socket transport and its 0700/uid
+// socket-directory ownership check. Windows uses a different transport (the named-pipe
+// control channel in internal/dlpipc with an owner-only SDDL), so they do not apply here.
 package cache
 
 import (

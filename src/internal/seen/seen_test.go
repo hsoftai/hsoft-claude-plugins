@@ -4,11 +4,22 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 )
 
+// skipOnWindows marks tests whose subject is the Unix ledger-directory model — the
+// TMPDIR location, the per-uid keying, and the 0700/owner ownership check. Windows uses a
+// different per-user location and ACL model, so these do not apply there.
+func skipOnWindows(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix ledger-dir semantics (TMPDIR, per-uid, 0700/owner) do not apply on Windows")
+	}
+}
+
 func TestRecordLoadClearPaths(t *testing.T) {
+	skipOnWindows(t)
 	t.Setenv("TMPDIR", t.TempDir())
 	s := "sess-1"
 	RecordPaths(s, []string{"op://Private/db/password", "op://Private/db/password", "keeper://uid/field/password"})
@@ -27,6 +38,7 @@ func TestRecordLoadClearPaths(t *testing.T) {
 // (fail-closed) rather than adopted — so a co-resident user cannot silently
 // disable the resolved-value leak backstop by pre-planting the dir.
 func TestLedgerDirIsPerUidAndOwnershipChecked(t *testing.T) {
+	skipOnWindows(t)
 	base := t.TempDir()
 	t.Setenv("TMPDIR", base)
 
@@ -63,6 +75,7 @@ func TestLedgerDirIsPerUidAndOwnershipChecked(t *testing.T) {
 // outer (pre-unshare) process pin the host's ledger dir so the namespace child
 // records into the SAME directory the host reads.
 func TestPathsDirOverride(t *testing.T) {
+	skipOnWindows(t)
 	// Simulate: host hooks read uid-based dir; the namespace child gets SG_PATHS_DIR.
 	hostDir := t.TempDir()
 	// The ownership check requires an exclusively-owned 0700 dir (t.TempDir may be 0755).

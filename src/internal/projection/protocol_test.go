@@ -3,14 +3,25 @@ package projection
 import (
 	"bytes"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
 func absUnder(root, name string) string { return filepath.Join(root, name) }
 
+// absTest builds an absolute path that is valid on every OS (filepath.IsAbs is true):
+// a bare leading separator is NOT absolute on Windows, which needs a drive letter.
+func absTest(parts ...string) string {
+	root := string(filepath.Separator)
+	if runtime.GOOS == "windows" {
+		root = `C:\`
+	}
+	return filepath.Join(append([]string{root}, parts...)...)
+}
+
 func validReq(t *testing.T) RegisterRequest {
 	t.Helper()
-	root := string(filepath.Separator) + filepath.Join("proj")
+	root := absTest("proj")
 	tok, err := NewToken()
 	if err != nil {
 		t.Fatal(err)
@@ -18,7 +29,7 @@ func validReq(t *testing.T) RegisterRequest {
 	return RegisterRequest{
 		ExecID:     "exec-1",
 		Root:       root,
-		Mountpoint: string(filepath.Separator) + filepath.Join("mnt", "exec-1"),
+		Mountpoint: absTest("mnt", "exec-1"),
 		Files:      []RenderedFile{{Path: absUnder(root, ".env"), Content: []byte("PASSWORD=val\n")}},
 		RootPID:    4321,
 		Token:      tok,
