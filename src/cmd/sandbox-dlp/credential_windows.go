@@ -92,56 +92,52 @@ var credOnce sync.Once
 // resolve, so it can never leave the service without a working credential.
 func ensureCredential() {
 	credOnce.Do(func() {
+		// 1) Externally provisioned (e.g. MDM managed-settings): use it as-is.
+		if os.Getenv("KSM_CONFIG") != "" {
+			return
+		}
 		store := credStorePath()
 
-		// Obtain the credential from the first available source:
-		//   1) KSM_CONFIG already in the environment (e.g. provisioned by MDM),
-		//   2) the previously-ingested DPAPI store,
-		//   3) a one-time export of the local ksm profile (keyring).
-		cfg := os.Getenv("KSM_CONFIG")
-		if cfg == "" {
-			if enc, err := os.ReadFile(store); err == nil {
-				if dec, derr := dpapiUnprotect(enc); derr == nil && len(dec) > 0 {
-					cfg = string(dec)
-				}
+		// 2) Already ingested on a prior run: load the DPAPI store and we're done — the
+		// global profile was already purged at first ingest, so no ksm calls are needed
+		// here (keeps service startup fast).
+		if enc, err := os.ReadFile(store); err == nil {
+			if dec, derr := dpapiUnprotect(enc); derr == nil && len(dec) > 0 {
+				os.Setenv("KSM_CONFIG", string(dec))
+				return
 			}
-		}
-		if cfg == "" {
-			exported, err := vault.ExportKeeperConfig()
-			dbg("ensureCredential: export len=%d err=%v", len(exported), err)
-			if err != nil || exported == "" {
-				return // no credential available yet
-			}
-			cfg = exported
 		}
 
-		// Confirm the credential resolves (with KSM_CONFIG set) BEFORE touching anything,
-		// so we can never strand the service without a working credential.
+		// 3) First run: ingest the local ksm profile once.
+		cfg, err := vault.ExportKeeperConfig()
+		dbg("ensureCredential: export len=%d err=%v", len(cfg), err)
+		if err != nil || cfg == "" {
+			return // no credential available yet
+		}
+		// Confirm it resolves BEFORE touching the global profile, so we can never strand
+		// the service without a working credential.
 		os.Setenv("KSM_CONFIG", cfg)
 		if verr := vault.VerifyKeeperConfig(); verr != nil {
 			dbg("ensureCredential: verify err=%v", verr)
 			os.Unsetenv("KSM_CONFIG")
 			return
 		}
-
 		// Persist a durable, user-DPAPI-encrypted copy so restarts need no re-provisioning.
 		persisted := false
-		if enc, err := dpapiProtect([]byte(cfg)); err == nil && os.WriteFile(store, enc, 0o600) == nil {
+		if enc, perr := dpapiProtect([]byte(cfg)); perr == nil && os.WriteFile(store, enc, 0o600) == nil {
 			if rt, rerr := os.ReadFile(store); rerr == nil {
 				if dec, derr := dpapiUnprotect(rt); derr == nil && string(dec) == cfg {
 					persisted = true
 				}
 			}
 		}
-
 		// Remove the global ksm profile so a bare `ksm` by ANY other process can no longer
 		// resolve — only this service can, via KSM_CONFIG. The delete MUST run with
 		// KSM_CONFIG unset, or ksm operates on the env config and the keyring profile
-		// survives. Only purge once we hold a durable copy. Idempotent.
+		// survives. Only purge once we hold a durable copy.
 		os.Unsetenv("KSM_CONFIG")
 		if persisted {
-			derr := vault.DeleteKeeperProfile()
-			dbg("ensureCredential: delete profile err=%v", derr)
+			dbg("ensureCredential: delete profile err=%v", vault.DeleteKeeperProfile())
 		}
 		os.Setenv("KSM_CONFIG", cfg) // restore for the service's own resolution
 	})
