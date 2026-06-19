@@ -162,7 +162,8 @@ func runHook() {
 	if err != nil {
 		self = ""
 	}
-	h := hook.NewHandler(toHookConfig(cfg, resolver.ProviderName()), eng, red, resolver, valueGuard(cfg), self)
+	useService, failClosed := guardMode(cfg)
+	h := hook.NewHandler(toHookConfig(cfg, resolver.ProviderName(), failClosed), eng, red, resolver, valueGuard(useService), self)
 	if cfg.IsCowork {
 		h.SetCoworkAnchor(coworkAnchor{})
 	}
@@ -248,7 +249,8 @@ func runRedactStream() {
 	// encoding). Prefer the in-memory cache daemon; fall back to re-resolving the
 	// recorded references in ephemeral memory if the daemon is unavailable.
 	if session := os.Getenv("SG_SESSION"); session != "" {
-		if _, red, ok := valueGuard(cfg).Scan(session, text); ok {
+		useService, _ := guardMode(cfg)
+		if _, red, ok := valueGuard(useService).Scan(session, text); ok {
 			text = red
 		} else if paths := seen.LoadPaths(session); len(paths) > 0 {
 			if resolver, err := vault.Select(cfg.VaultProvider, vault.NewRunner(), cfg.OPAccount); err == nil {
@@ -711,7 +713,7 @@ func readInput(r io.Reader) (hook.Input, error) {
 	return in, err
 }
 
-func toHookConfig(c config.Config, vaultName string) hook.Config {
+func toHookConfig(c config.Config, vaultName string, failClosed bool) hook.Config {
 	return hook.Config{
 		BlockOnPromptSecret: c.BlockOnPromptSecret,
 		ToolInputPolicy:     c.ToolInputPolicy,
@@ -727,10 +729,10 @@ func toHookConfig(c config.Config, vaultName string) hook.Config {
 		// so `sandbox=auto` must still wrap.
 		SandboxMode: c.SandboxWrap(vaultName != "none" || kernelDLPActive(c)),
 		ShellTools:  splitList(c.ShellTools),
-		// Fail closed when the redaction guard is mandatory but has no local fallback
-		// (Windows: the sandbox-dlp service is the sole value store). A down service must
-		// never silently let a secret reach the model.
-		RequireGuard: requireServiceGuard(c),
+		// Fail closed when the redaction guard is mandatory but unavailable. Resolved by
+		// guardMode (GUARD_REQUIRED + service reachability), so a machine without the
+		// service degrades to the detector instead of blocking every prompt and tool.
+		RequireGuard: failClosed,
 	}
 }
 

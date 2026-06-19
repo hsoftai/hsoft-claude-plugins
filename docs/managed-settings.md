@@ -115,6 +115,13 @@ What each key does:
   renderer; `require` fails closed when the service is absent (never writes a value to
   disk); `auto` uses the service when present. Set `off` to disable the kernel-DLP path
   on Windows independently of `SANDBOX`.
+- **`GUARD_REQUIRED`** (`auto` | `on` | `off`) — fail-closed policy when the redaction
+  guard cannot verify a text (on Windows: the `sandbox-dlp` service is unreachable).
+  `auto` (default) fails closed only where the service is actually running, so a machine
+  where it was never provisioned (e.g. WinFsp not installed) degrades to the pattern
+  detector instead of blocking every prompt and tool — an incomplete install does not
+  brick the CLI. `on` always fails closed when the guard is unavailable (strict; for
+  fleets that guarantee the service is installed). `off` never fails closed.
 - **`PRELOAD_SECRETS`** (`auto` | `on` | `off`) — the proactive full-vault redaction
   guard. When enabled (default), every value the vault exposes is held in memory (in the
   per-session cache on macOS/Linux, in the `sandbox-dlp` service on Windows) and any

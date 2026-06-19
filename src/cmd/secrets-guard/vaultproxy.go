@@ -133,23 +133,41 @@ func (serviceCache) Scan(_, text string) (found bool, redacted string, ok bool) 
 
 func (serviceCache) Shutdown(string) {}
 
-// requireServiceGuard reports whether the redaction guard MUST run in the sandbox-dlp
-// service: on Windows (not Cowork) with the guard enabled, the service is the sole holder
-// of the vault values and the per-user socket cache does not apply, so there is no local
-// fallback. This is INDEPENDENT of KERNEL_DLP / sandbox — the guard is the always-on core
-// even when reference rendering is off. When it returns true the hook is told to FAIL
-// CLOSED if the service is unreachable (a crashed service must never silently leak).
-func requireServiceGuard(cfg config.Config) bool {
-	return runtime.GOOS == "windows" && !cfg.IsCowork && cfg.PreloadEnabled()
+// guardMode decides, for this hook invocation, how the known-value redaction guard runs:
+//   useService — route scans to the sandbox-dlp service (Windows; it holds the values and
+//     the per-user socket cache does not apply there).
+//   failClosed — block when the service cannot verify a text (the hook's RequireGuard).
+//
+// On Windows the service is the sole value store, so the guard is service-backed. Whether
+// to FAIL CLOSED depends on GUARD_REQUIRED and whether the service is actually reachable
+// (after a best-effort restart): `auto` fails closed only where the service runs — so a
+// transient crash is caught, but a machine where the service was never provisioned (e.g.
+// WinFsp not installed) DEGRADES to the built-in detector instead of blocking every prompt
+// and tool (which would brick the CLI). `on` always fails closed (strict); `off` never
+// does. Off Windows (or with the guard disabled / in Cowork) the per-session cache is used.
+func guardMode(cfg config.Config) (useService, failClosed bool) {
+	if runtime.GOOS != "windows" || cfg.IsCowork || !cfg.PreloadEnabled() {
+		return false, false
+	}
+	switch cfg.GuardRequired {
+	case "off":
+		return true, false
+	case "on":
+		ensureServiceRunning()
+		return true, true // strict: fail closed even if the service is down
+	default: // auto
+		ensureServiceRunning()
+		if dlpipc.Healthy() {
+			return true, true // service is up here — fail closed on any later unavailability
+		}
+		return false, false // never provisioned/unreachable — degrade to the detector
+	}
 }
 
-// valueGuard chooses where the resolved/known-value redaction guard lives: the service
-// on Windows (it holds the values; the local socket cache does not apply there), the
-// per-session in-memory cache otherwise. On the service path it best-effort (re)starts
-// the service if it is down, so a transient crash self-heals.
-func valueGuard(cfg config.Config) hook.SecretCache {
-	if requireServiceGuard(cfg) {
-		ensureServiceRunning()
+// valueGuard returns the redaction-guard store: the sandbox-dlp service when useService is
+// set, otherwise the per-session in-memory cache.
+func valueGuard(useService bool) hook.SecretCache {
+	if useService {
 		return serviceCache{}
 	}
 	return cache.New()

@@ -28,6 +28,34 @@ func TestLoad_Defaults(t *testing.T) {
 	if !c.PreloadEnabled() {
 		t.Errorf("PreloadEnabled should be true by default")
 	}
+	// Fail-closed policy defaults to auto (fail closed only where the service runs).
+	if c.GuardRequired != "auto" {
+		t.Errorf("GuardRequired default = %q, want auto", c.GuardRequired)
+	}
+}
+
+func TestLoad_GuardRequired(t *testing.T) {
+	for _, v := range []string{"on", "off", "auto"} {
+		c := Load(func(k string) string {
+			if k == "CLAUDE_PLUGIN_OPTION_GUARD_REQUIRED" {
+				return v
+			}
+			return ""
+		})
+		if c.GuardRequired != v {
+			t.Errorf("GuardRequired = %q, want %q", c.GuardRequired, v)
+		}
+	}
+	// Invalid falls back to auto.
+	c := Load(func(k string) string {
+		if k == "CLAUDE_PLUGIN_OPTION_GUARD_REQUIRED" {
+			return "bogus"
+		}
+		return ""
+	})
+	if c.GuardRequired != "auto" {
+		t.Errorf("invalid GuardRequired should fall back to auto, got %q", c.GuardRequired)
+	}
 }
 
 func TestSandboxWrap_CoworkForcesOnEvenWhenOff(t *testing.T) {

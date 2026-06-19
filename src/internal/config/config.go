@@ -66,6 +66,17 @@ type Config struct {
 	// blocks a value secrets-guard itself resolved.
 	PreloadSecrets string // auto | on | off
 
+	// GuardRequired controls FAIL-CLOSED behavior when the redaction guard cannot verify a
+	// text (on Windows, the sandbox-dlp service — the sole value store — is unreachable).
+	//   auto (default): fail closed ONLY where the service is actually deployed and
+	//     running (or can be started). On a machine where it was never provisioned (e.g.
+	//     WinFsp not installed) the guard degrades to the built-in pattern detector instead
+	//     of blocking every prompt/tool — so an incomplete install does not brick the CLI.
+	//   on: always fail closed when the guard is unavailable (strict; blocks everything
+	//     until the service is up). For high-assurance fleets that guarantee the service.
+	//   off: never fail closed (always degrade to the detector).
+	GuardRequired string // auto | on | off
+
 	// IsCowork is the resolved detection: true when this process is the Cowork host
 	// hook (the agent's commands run in the VM). Deterministic via
 	// CLAUDE_CODE_IS_COWORK; an explicit execution_mode of cowork/local overrides it.
@@ -90,6 +101,7 @@ func Load(env Getenv) Config {
 		Sandbox:             "off",
 		KernelDLP:           "auto",
 		PreloadSecrets:      "auto",
+		GuardRequired:       "auto",
 	}
 
 	c.VaultProvider = oneOf(env(prefix+"VAULT_PROVIDER"), c.VaultProvider, "auto", "keeper", "1password")
@@ -112,6 +124,7 @@ func Load(env Getenv) Config {
 	c.KernelDLP = oneOf(env(prefix+"KERNEL_DLP"), c.KernelDLP, "auto", "require", "off")
 	c.DLPInstallSource = strings.TrimSpace(env(prefix + "DLP_INSTALL_SOURCE"))
 	c.PreloadSecrets = oneOf(env(prefix+"PRELOAD_SECRETS"), c.PreloadSecrets, "auto", "on", "off")
+	c.GuardRequired = oneOf(env(prefix+"GUARD_REQUIRED"), c.GuardRequired, "auto", "on", "off")
 
 	// Detect the Cowork host hook (the agent's commands run in the VM). The detector
 	// is deterministic — Claude Code sets CLAUDE_CODE_IS_COWORK=1 in the host hook's
