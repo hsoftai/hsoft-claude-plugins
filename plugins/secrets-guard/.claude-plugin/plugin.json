@@ -1,7 +1,7 @@
 {
   "name": "secrets-guard",
   "displayName": "secrets-guard",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Keep secrets out of the model: block plaintext secrets in prompts, resolve vault references (Keeper/1Password) into tool input, and redact secrets leaked in tool output.",
   "author": {
     "name": "Humphrey Consulting Group"
@@ -97,7 +97,19 @@
     "sandbox": {
       "type": "string",
       "title": "Secret-rendering sandbox",
-      "description": "Render vault references into real values — in the environment, in files under the working directory, AND in the command body — scoped to one command, so apps that read secrets from config files just work. Runs on ALL platforms: Linux uses a private bind-mount (the value never touches the real disk); macOS/Windows render files in place and restore the original references right after the command (a crash-recovery journal makes that safe). 'auto' (default) enables it wherever a vault resolves; 'on' forces it; 'off' disables file rendering.",
+      "description": "Render vault references into real values — in the environment, in files under the working directory, AND in the command body — scoped to one command, so apps that read secrets from config files just work. OFF by default: the product's primary guarantee is redaction (no vault value reaches the model), not reference rendering, so apps just read their own local files (e.g. a .env holding the real value) and the model only ever sees the redacted form. 'on' enables rendering (Linux uses a private bind-mount; macOS/Windows render in place and restore via a crash-recovery journal); 'auto' enables it wherever a vault resolves; 'off' (default) disables it. The redaction guard runs regardless. In Cowork the sandbox is the value-delivery channel and is always on.",
+      "default": "off"
+    },
+    "preload_secrets": {
+      "type": "string",
+      "title": "Proactive full-vault redaction guard",
+      "description": "Load every value the vault exposes into memory and redact or block any of them (in any encoding) in prompts, tool inputs, tool outputs and file reads — even values never referenced this session — so a known vault secret can never reach the model. On macOS/Linux the values live in the per-session cache; on Windows in the sandbox-dlp service (the credential holder). 'auto' (default) and 'on' enable it; 'off' limits the guard to values resolved during the session.",
+      "default": "auto"
+    },
+    "guard_required": {
+      "type": "string",
+      "title": "Fail-closed policy",
+      "description": "What to do when the redaction guard cannot verify a text (on Windows: the sandbox-dlp service is unreachable). 'auto' (default) fails closed only where the service is actually running, so a machine that never installed it degrades to the built-in pattern detector instead of blocking every prompt and tool (an incomplete install does not brick the CLI). 'on' always fails closed when the guard is unavailable (strict; for fleets that guarantee the service). 'off' never fails closed.",
       "default": "auto"
     },
     "sandbox_globs": {
