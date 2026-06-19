@@ -77,6 +77,9 @@ func main() {
 		case "dlp-status":
 			runDLPStatus()
 			return
+		case "doctor":
+			runDoctor()
+			return
 		case "dlp-install":
 			runDLPInstall(config.Load(os.Getenv))
 			return

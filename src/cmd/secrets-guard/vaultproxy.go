@@ -149,18 +149,18 @@ func guardMode(cfg config.Config) (useService, failClosed bool) {
 	if runtime.GOOS != "windows" || cfg.IsCowork || !cfg.PreloadEnabled() {
 		return false, false
 	}
+	// The redaction guard is NEVER allowed to block Claude Code just because it is
+	// unavailable: it is an enhancement, not a prerequisite. When the service is up, scans
+	// run against the full vault (known values are redacted/blocked); when it is down or its
+	// value store can't load, the hook degrades to the built-in pattern detector. Only the
+	// explicit strict opt-in (GUARD_REQUIRED=on) blocks on unavailability.
 	switch cfg.GuardRequired {
-	case "off":
-		return true, false
 	case "on":
 		ensureServiceRunning()
-		return true, true // strict: fail closed even if the service is down
-	default: // auto
-		ensureServiceRunning()
-		if dlpipc.Healthy() {
-			return true, true // service is up here — fail closed on any later unavailability
-		}
-		return false, false // never provisioned/unreachable — degrade to the detector
+		return true, true // strict: fail closed when the guard cannot verify
+	default: // auto (default) and off
+		ensureServiceRunning() // best-effort start so the full guard works when possible
+		return true, false     // never block on unavailability — degrade to the detector
 	}
 }
 

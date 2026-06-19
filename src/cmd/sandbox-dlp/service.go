@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -23,6 +24,25 @@ import (
 	"github.com/hsoftai/hsoft-claude-plugins/internal/seen"
 	"github.com/hsoftai/hsoft-claude-plugins/internal/vault"
 )
+
+// svclog appends a value-free diagnostic line to the service's persistent log, so failures
+// are visible even though the service is launched detached (no stderr). It NEVER logs
+// secret values — only counts and error strings. Best-effort.
+func svclog(format string, args ...any) {
+	dir := filepath.Join(os.Getenv("LOCALAPPDATA"), "secrets-guard", "sandbox-dlp")
+	if dir == filepath.Join("", "secrets-guard", "sandbox-dlp") { // LOCALAPPDATA unset (non-Windows)
+		dir = filepath.Join(os.TempDir(), "secrets-guard")
+	}
+	if os.MkdirAll(dir, 0o700) != nil {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "service.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, time.Now().Format("2006-01-02 15:04:05")+" "+format+"\n", args...)
+}
 
 // dbg writes a diagnostic line to stderr when SG_DLP_DEBUG is set (never logs secret
 // values, only resolution metadata).
@@ -334,16 +354,20 @@ func guardValues() ([]string, bool) {
 			valueGuardStore.vals = v
 			valueGuardStore.loadedAt = time.Now()
 			valueGuardStore.loaded = true
+			svclog("guard: loaded %d values from %s", len(v), cat.Provider())
 			return v, true
 		} else {
 			dbg("guard refresh: %v", e)
+			svclog("guard: refresh failed (cannot read vault values): %v", e)
 		}
 	} else {
 		dbg("guard select: %v", err)
+		svclog("guard: no vault available (catalog.Select): %v", err)
 	}
 	if valueGuardStore.loaded {
 		return valueGuardStore.vals, true // serve last good snapshot through a transient failure
 	}
+	svclog("guard: value store UNAVAILABLE — clients will fail closed (or degrade in auto)")
 	return nil, false // never loaded — the guard cannot verify; caller fails closed
 }
 

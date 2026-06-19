@@ -55,6 +55,62 @@ func runDLPStatus() {
 	os.Exit(1)
 }
 
+// runDoctor implements `secrets-guard doctor`: a value-free diagnostic of the redaction
+// guard. Run it in EACH environment that misbehaves (e.g. a system terminal vs a VSCode
+// terminal) — differing SID/endpoint, OpStatus vs OpScan results, or guardMode decision
+// pinpoint why one blocks and the other does not.
+func runDoctor() {
+	cfg := config.Load(os.Getenv)
+	fmt.Println("secrets-guard doctor —", version)
+	fmt.Println("  os:           ", runtime.GOOS)
+	fmt.Println("  user:         ", os.Getenv("USERNAME"))
+	fmt.Println("  LOCALAPPDATA: ", os.Getenv("LOCALAPPDATA"))
+	if ep, err := dlpipc.Endpoint(); err == nil {
+		fmt.Println("  control pipe: ", ep) // contains the user SID on Windows
+	} else {
+		fmt.Println("  control pipe:  (error)", err)
+	}
+	if _, err := exec.LookPath("ksm"); err == nil {
+		fmt.Println("  ksm on PATH:   yes (client; note: only the service needs it)")
+	} else {
+		fmt.Println("  ksm on PATH:   no (expected on the client)")
+	}
+
+	// Self-heal first (start the service if down), so the probes below reflect the SAME
+	// state the hook acts on — not a pre-heal snapshot.
+	if runtime.GOOS == "windows" && cfg.PreloadEnabled() && !cfg.IsCowork {
+		ensureServiceRunning()
+	}
+
+	// OpStatus: does the service pipe answer at all?
+	if resp, err := dlpipc.Call(projection.ControlRequest{Op: projection.OpStatus}); err == nil && resp.OK {
+		fmt.Printf("  service:       reachable (active=%d driver=%s)\n", resp.Active, resp.Driver)
+	} else {
+		fmt.Printf("  service:       NOT reachable (%v)\n", err)
+	}
+	// OpScan: is the guard actually functional (value store loaded)?
+	if resp, err := dlpipc.Call(projection.ControlRequest{Op: projection.OpScan, Scan: &projection.ScanRequest{Text: ""}}); err != nil {
+		fmt.Printf("  guard (scan):  call error: %v\n", err)
+	} else if !resp.OK {
+		fmt.Printf("  guard (scan):  store UNAVAILABLE: %s\n", resp.Error)
+	} else {
+		fmt.Println("  guard (scan):  functional (value store loaded)")
+	}
+
+	useService, failClosed := guardMode(cfg)
+	fmt.Printf("  guardMode:     useService=%v failClosed=%v\n", useService, failClosed)
+	fmt.Printf("  options:       sandbox=%s kernel_dlp=%s preload_secrets=%s guard_required=%s\n",
+		cfg.Sandbox, cfg.KernelDLP, cfg.PreloadSecrets, cfg.GuardRequired)
+	if failClosed {
+		fmt.Println("  => prompts/tools will BLOCK (fail-closed) until the guard is functional or you set guard_required=off.")
+	} else {
+		fmt.Println("  => prompts/tools are allowed (guard functional, or degraded to the pattern detector).")
+	}
+	if runtime.GOOS == "windows" {
+		fmt.Println("  service log:   %LOCALAPPDATA%\\secrets-guard\\sandbox-dlp\\service.log")
+	}
+}
+
 // runDLPInstall implements `secrets-guard dlp-install`.
 func runDLPInstall(cfg config.Config) {
 	if runtime.GOOS != "windows" {
