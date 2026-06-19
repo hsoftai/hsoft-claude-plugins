@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"runtime"
 
 	"github.com/hsoftai/hsoft-claude-plugins/internal/cache"
 	"github.com/hsoftai/hsoft-claude-plugins/internal/catalog"
@@ -128,10 +129,21 @@ func (serviceCache) Scan(_, text string) (found bool, redacted string, ok bool) 
 
 func (serviceCache) Shutdown(string) {}
 
+// useServiceGuard reports whether the redaction guard should run in the service. On
+// Windows the per-user unix-socket cache is unavailable and the client holds no
+// credential, so whenever the service answers (it holds every vault value for OpScan)
+// the guard runs there. This is INDEPENDENT of KERNEL_DLP / sandbox: the guard is the
+// always-on core (inspect every prompt and tool I/O) even when reference rendering is
+// off — it only needs the service to be reachable.
+func useServiceGuard(cfg config.Config) bool {
+	return runtime.GOOS == "windows" && !cfg.IsCowork && dlpipc.Healthy()
+}
+
 // valueGuard chooses where the resolved/known-value redaction guard lives: the service
-// on Windows kernel-DLP (it holds the values), the per-session in-memory cache otherwise.
+// on Windows (it holds the values; the local socket cache does not apply there), the
+// per-session in-memory cache otherwise.
 func valueGuard(cfg config.Config) hook.SecretCache {
-	if useServiceVault(cfg) {
+	if useServiceGuard(cfg) {
 		return serviceCache{}
 	}
 	return cache.New()

@@ -32,6 +32,13 @@ type Config struct {
 	// Sandbox renders vault references (in env AND in matched files under cwd) into
 	// real values inside an ephemeral per-command mount namespace, so apps that read
 	// secrets from files — not just `secrets-guard run --env-file` — just work.
+	//
+	// DEFAULT off: the product's primary guarantee is that NO secret value reaches the
+	// model's context (the redaction guard inspects every prompt and tool input/output).
+	// Reference rendering is an opt-in convenience (`on`), not the default. Apps keep
+	// reading their own local files (e.g. a `.env` with the real value); the model only
+	// ever sees the redacted form. In Cowork the sandbox is the value-delivery channel,
+	// so SandboxWrap forces it on there regardless of this setting.
 	Sandbox      string // auto | on | off
 	SandboxGlobs string // comma-separated globs overriding the default scan set
 
@@ -80,7 +87,7 @@ func Load(env Getenv) Config {
 		CommandReferences:   "inject",
 		ExecutionMode:       "auto",
 		CoworkRefPolicy:     "audit",
-		Sandbox:             "auto",
+		Sandbox:             "off",
 		KernelDLP:           "auto",
 		PreloadSecrets:      "auto",
 	}
@@ -131,14 +138,18 @@ func Load(env Getenv) Config {
 //
 // The sandbox runs on every platform: Linux uses a private bind-mount (the value
 // never touches the real disk), and macOS/Windows render files in place with a
-// guaranteed restore. In Cowork the command runs in the Linux VM, so it always
-// applies there. `auto` enables it wherever a vault can resolve; `on` forces it;
-// `off` disables it.
+// guaranteed restore. In Cowork the command runs in the Linux VM and the sandbox is
+// the ONLY value-delivery channel, so it is always on there (checked first, before
+// `off`). Otherwise: `off` (the default) disables it; `on` forces it; `auto` enables
+// it wherever a vault can resolve.
 func (c Config) SandboxWrap(hasVault bool) bool {
+	if c.IsCowork {
+		return true // Cowork delivers values only through the sandbox channel
+	}
 	if c.Sandbox == "off" {
 		return false
 	}
-	if c.IsCowork || c.Sandbox == "on" {
+	if c.Sandbox == "on" {
 		return true
 	}
 	return hasVault // auto

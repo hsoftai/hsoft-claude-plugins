@@ -46,7 +46,7 @@ run `installers/windows/sandbox-dlp-setup.ps1` (installs WinFsp + the service).
     "CLAUDE_PLUGIN_OPTION_TOOL_INPUT_POLICY": "deny",
     "CLAUDE_PLUGIN_OPTION_TOOL_OUTPUT_MODE": "redact",
     "CLAUDE_PLUGIN_OPTION_AUDIT_LOG_PATH": "/var/log/secrets-guard/audit.log",
-    "CLAUDE_PLUGIN_OPTION_SANDBOX": "auto",
+    "CLAUDE_PLUGIN_OPTION_SANDBOX": "off",
     "CLAUDE_PLUGIN_OPTION_KERNEL_DLP": "auto",
     "CLAUDE_PLUGIN_OPTION_PRELOAD_SECRETS": "auto",
     "KSM_CONFIG": "<base64-keeper-config>"
@@ -65,11 +65,14 @@ What each key does:
 
 ### Execution & redaction options
 
-- **`SANDBOX`** (`auto` | `on` | `off`) — the sandbox renders vault references (in the
-  environment and in files under the working directory) into real values for the
-  command's process only. `off` is the **kill switch**: no command is wrapped and no
-  file is rendered (references are left literal). `auto` enables it wherever a vault can
-  resolve; `on` forces it.
+- **`SANDBOX`** (`auto` | `on` | `off`, **default `off`**) — the sandbox renders vault
+  references (in the environment and in files under the working directory) into real
+  values for the command's process only. It is **off by default**: the product's primary
+  guarantee is redaction (no vault value reaches the model), not reference rendering, so
+  apps just read their own local files (e.g. a `.env` holding the real value) and the
+  model only ever sees the redacted form. `on` enables reference rendering; `auto`
+  enables it wherever a vault can resolve. The redaction guard runs regardless of this
+  setting.
 - **`KERNEL_DLP`** (`auto` | `require` | `off`, **Windows only**) — selects the WinFsp
   `sandbox-dlp` service for per-process file rendering. `off` keeps the in-place
   renderer; `require` fails closed when the service is absent (never writes a value to

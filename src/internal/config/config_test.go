@@ -16,6 +16,26 @@ func TestLoad_Defaults(t *testing.T) {
 	if c.ToolOutputMode != "redact" {
 		t.Errorf("ToolOutputMode default = %q, want redact", c.ToolOutputMode)
 	}
+	// The sandbox is OFF by default: the default product behavior is redaction-only
+	// (inspect every prompt and tool I/O), not reference rendering.
+	if c.Sandbox != "off" {
+		t.Errorf("Sandbox default = %q, want off", c.Sandbox)
+	}
+	if c.SandboxWrap(true) {
+		t.Errorf("SandboxWrap should be false by default (sandbox off, not Cowork)")
+	}
+	// The redaction guard is on by default.
+	if !c.PreloadEnabled() {
+		t.Errorf("PreloadEnabled should be true by default")
+	}
+}
+
+func TestSandboxWrap_CoworkForcesOnEvenWhenOff(t *testing.T) {
+	c := Load(func(string) string { return "" }) // Sandbox defaults to off
+	c.IsCowork = true
+	if !c.SandboxWrap(false) {
+		t.Errorf("Cowork must force the sandbox on (its only value channel), even with sandbox=off")
+	}
 }
 
 func TestLoad_FromEnv(t *testing.T) {

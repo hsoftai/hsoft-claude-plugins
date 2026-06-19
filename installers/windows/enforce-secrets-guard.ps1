@@ -12,8 +12,9 @@
     - permissions.disableBypassPermissionsMode = "disable"  (no --dangerously-skip / bypass)
     - the hsoft-claude-plugins marketplace (GitHub), locked down (strictKnownMarketplaces)
     - secrets-guard force-enabled (users cannot turn it off)
-    - the full plugin policy (deny tool-input secrets, redact output, sandbox + kernel-DLP
-      + proactive full-vault redaction guard, all on)
+    - the full plugin policy: redaction-only by default (sandbox OFF), deny tool-input
+      secrets, redact output, and the proactive full-vault redaction guard ON - so no
+      vault value ever reaches the model's context
 
   After it runs, the NEXT Claude Code start installs/activates the plugin automatically
   (its SessionStart hook puts the `secrets-guard` CLI on PATH). The Windows kernel-DLP
@@ -40,8 +41,12 @@ param(
   # Where the audit log is written. Empty -> auditing left to the plugin default (off).
   [string]$AuditLogPath = "C:\ProgramData\secrets-guard\audit.log",
 
-  # Sandbox / kernel-DLP / proactive redaction guard switches (auto = on where applicable).
-  [ValidateSet("auto", "on", "off")]   [string]$Sandbox        = "auto",
+  # Sandbox / kernel-DLP / proactive redaction guard switches.
+  # Sandbox defaults to OFF: the enforced behavior is redaction-only (no reference
+  # rendering) - secrets-guard inspects every prompt and tool I/O and never lets a vault
+  # value reach the model. KernelDlp stays auto so the sandbox-dlp service runs and backs
+  # the redaction guard (OpScan) on Windows. PreloadSecrets keeps the guard always on.
+  [ValidateSet("auto", "on", "off")]   [string]$Sandbox        = "off",
   [ValidateSet("auto", "require", "off")][string]$KernelDlp     = "auto",
   [ValidateSet("auto", "on", "off")]   [string]$PreloadSecrets = "auto",
 

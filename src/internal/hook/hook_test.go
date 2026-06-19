@@ -113,9 +113,8 @@ func TestUserPromptSubmit_BlocksPlaintextSecret(t *testing.T) {
 	if out.Decision != "block" {
 		t.Fatalf("expected block, got %+v", out)
 	}
-	if !strings.Contains(strings.ToLower(out.SystemMessage), "keeper") &&
-		!strings.Contains(strings.ToLower(out.SystemMessage), "bóveda") {
-		t.Fatalf("system message should guide to a vault reference, got %q", out.SystemMessage)
+	if !strings.Contains(strings.ToLower(out.SystemMessage), ".env") {
+		t.Fatalf("system message should guide the user to put the secret in a .env file, got %q", out.SystemMessage)
 	}
 }
 

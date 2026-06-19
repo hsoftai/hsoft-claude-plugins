@@ -209,8 +209,8 @@ func (h *Handler) handlePrompt(in Input) Output {
 		return Output{
 			Decision: "block",
 			Reason:   "secrets-guard: prompt contains a known vault secret value",
-			SystemMessage: "🛑 secrets-guard bloqueó el envío: el prompt contiene el valor de un secreto de tu bóveda. " +
-				"No pegues valores de secretos; usa su referencia (op://… / keeper://…) y deja que el hook lo resuelva al ejecutar.",
+			SystemMessage: "🛑 secrets-guard bloqueó el envío: el prompt contiene el valor de una contraseña de tu bóveda. " +
+				"El modelo no debe ver contraseñas: ponla en un archivo .env local y deja que tus scripts la lean de ahí; nunca la pegues en el chat.",
 		}
 	}
 
@@ -226,10 +226,10 @@ func (h *Handler) handlePrompt(in Input) Output {
 		Reason:   "secrets-guard: plaintext secret detected in prompt",
 		SystemMessage: fmt.Sprintf(
 			"🛑 secrets-guard bloqueó el envío: se detectó un posible secreto en texto plano (%s). "+
-				"No pegues contraseñas ni claves en Claude Code: guárdalas en tu bóveda y pega su referencia "+
-				"en lugar del valor. Usa %s. El hook resolverá el secreto solo al ejecutar la herramienta, "+
-				"sin que el modelo lo vea.",
-			strings.Join(cats, ", "), vaultHint(h.cfg.VaultName)),
+				"No pegues contraseñas ni claves en el chat — el modelo no debe ver el valor. "+
+				"Ponla en un archivo .env local (p. ej. `DB_PASSWORD=...`); tus scripts la leen de ahí al "+
+				"ejecutarse, pero el valor nunca llega al contexto del modelo.",
+			strings.Join(cats, ", ")),
 	}
 }
 
