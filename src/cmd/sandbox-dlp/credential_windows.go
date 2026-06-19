@@ -4,14 +4,58 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 
 	"github.com/hsoftai/hsoft-claude-plugins/internal/vault"
 )
+
+var pathOnce sync.Once
+
+// augmentMachinePath ensures the vault CLI (ksm/op) is resolvable by the service even when
+// it was launched with a stale PATH (e.g. a logon task started before the CLI was added to
+// the machine PATH, or a hook-spawned restart inheriting Claude Code's environment). It
+// prepends the persisted Machine and User PATH (read from the registry, env vars expanded)
+// to this process's PATH. Without this the service can silently fail to load the vault
+// values; the guard then fails closed, but this keeps it WORKING in the normal case.
+func augmentMachinePath() {
+	pathOnce.Do(func() {
+		if _, err := exec.LookPath("ksm"); err == nil {
+			return // already resolvable
+		}
+		var extra []string
+		for _, e := range []struct {
+			root registry.Key
+			sub  string
+		}{
+			{registry.LOCAL_MACHINE, `SYSTEM\CurrentControlSet\Control\Session Manager\Environment`},
+			{registry.CURRENT_USER, `Environment`},
+		} {
+			k, err := registry.OpenKey(e.root, e.sub, registry.QUERY_VALUE)
+			if err != nil {
+				continue
+			}
+			if v, _, err := k.GetStringValue("Path"); err == nil && v != "" {
+				if exp, eerr := registry.ExpandString(v); eerr == nil {
+					v = exp
+				}
+				extra = append(extra, v)
+			}
+			k.Close()
+		}
+		if len(extra) == 0 {
+			return
+		}
+		sep := string(os.PathListSeparator)
+		os.Setenv("PATH", strings.Join(extra, sep)+sep+os.Getenv("PATH"))
+	})
+}
 
 // This file makes the sandbox-dlp service the SOLE holder of the Keeper credential on
 // Windows. The credential lives only in (a) the service's own process environment
@@ -91,6 +135,7 @@ var credOnce sync.Once
 // delete only happens after the DPAPI store round-trips AND the config is confirmed to
 // resolve, so it can never leave the service without a working credential.
 func ensureCredential() {
+	augmentMachinePath() // make ksm/op resolvable even under a stale launch PATH
 	credOnce.Do(func() {
 		// 1) Externally provisioned (e.g. MDM managed-settings): use it as-is.
 		if os.Getenv("KSM_CONFIG") != "" {

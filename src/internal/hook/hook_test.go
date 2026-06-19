@@ -151,6 +151,53 @@ func TestUserPromptSubmit_BlocksKnownVaultValue(t *testing.T) {
 	}
 }
 
+// handlerGuardUnavailable simulates the mandatory-guard path with the value store DOWN:
+// noopCache makes Scan return ok=false, and RequireGuard forbids the (no-op) fallback.
+func handlerGuardUnavailable() *Handler {
+	cfg := defaultCfg()
+	cfg.RequireGuard = true
+	eng := detect.New()
+	return NewHandler(cfg, eng, redact.New(eng), fakeResolver{value: "RESOLVED_SECRET"}, noopCache{}, "/opt/sg/bin/secrets-guard")
+}
+
+func TestPromptFailsClosedWhenGuardUnavailable(t *testing.T) {
+	h := handlerGuardUnavailable()
+	out := h.Handle(Input{HookEventName: "UserPromptSubmit", Prompt: "totally innocuous text"})
+	if out.Decision != "block" {
+		t.Fatalf("prompt must FAIL CLOSED when the mandatory guard is unavailable, got %+v", out)
+	}
+}
+
+func TestPostToolFailsClosedWhenGuardUnavailable(t *testing.T) {
+	h := handlerGuardUnavailable()
+	out := h.Handle(Input{HookEventName: "PostToolUse", ToolName: "Read", ToolResponse: []byte(`{"content":"hello world"}`)})
+	if out.Decision != "block" {
+		t.Fatalf("tool output must FAIL CLOSED when the mandatory guard is unavailable, got %+v", out)
+	}
+}
+
+func TestPreToolFailsClosedWhenGuardUnavailable(t *testing.T) {
+	h := handlerGuardUnavailable()
+	out := h.Handle(Input{HookEventName: "PreToolUse", ToolName: "Read", ToolInput: []byte(`{"file_path":"/etc/hosts"}`)})
+	if out.HookSpecificOutput == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("tool input must FAIL CLOSED (deny) when the mandatory guard is unavailable, got %+v", out)
+	}
+}
+
+func TestGuardAvailableDoesNotFailClosed(t *testing.T) {
+	// With a reachable cache (ok=true) that reports clean, nothing is blocked even when
+	// RequireGuard is set — fail-closed only triggers on UNAVAILABILITY, not on every call.
+	cfg := defaultCfg()
+	cfg.RequireGuard = true
+	cfg.BlockOnPromptSecret = false
+	eng := detect.New()
+	h := NewHandler(cfg, eng, redact.New(eng), fakeResolver{value: "RESOLVED_SECRET"}, knownCache{}, "x")
+	out := h.Handle(Input{HookEventName: "UserPromptSubmit", Prompt: "refactor the module"})
+	if out.Decision == "block" {
+		t.Fatalf("clean text with a reachable guard must not be blocked, got %+v", out)
+	}
+}
+
 func TestUserPromptSubmit_BlocksKnownValueEvenWhenPromptScanOff(t *testing.T) {
 	cfg := defaultCfg()
 	cfg.BlockOnPromptSecret = false // the known-value invariant is independent of this

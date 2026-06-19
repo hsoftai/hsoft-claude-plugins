@@ -301,6 +301,7 @@ var valueGuardStore struct {
 	mu       sync.Mutex
 	vals     []string
 	loadedAt time.Time
+	loaded   bool // a successful load has happened at least once
 }
 
 const valueGuardTTL = 2 * time.Minute
@@ -309,18 +310,22 @@ const valueGuardTTL = 2 * time.Minute
 // create so the new secret is guarded without waiting for the TTL).
 func invalidateValueGuard() {
 	valueGuardStore.mu.Lock()
+	valueGuardStore.loaded = false
 	valueGuardStore.loadedAt = time.Time{}
 	valueGuardStore.mu.Unlock()
 }
 
-// guardValues returns the cached vault values, refreshing them from the vault when the
-// TTL has lapsed. On a refresh failure it keeps the last good snapshot (fail-safe: the
-// guard never silently empties on a transient vault hiccup).
-func guardValues() []string {
+// guardValues returns the cached vault values and whether the store is USABLE. It
+// refreshes from the vault when the TTL has lapsed. ok is false ONLY when the store has
+// never loaded successfully (e.g. no credential / ksm unreachable at startup) — the
+// caller must then FAIL CLOSED rather than treat an empty set as "clean" (a silent
+// fail-open). Once a load has succeeded, a later transient refresh failure keeps serving
+// the last good snapshot (ok stays true) so a momentary vault hiccup does not lock up.
+func guardValues() ([]string, bool) {
 	valueGuardStore.mu.Lock()
 	defer valueGuardStore.mu.Unlock()
-	if valueGuardStore.vals != nil && time.Since(valueGuardStore.loadedAt) < valueGuardTTL {
-		return valueGuardStore.vals
+	if valueGuardStore.loaded && time.Since(valueGuardStore.loadedAt) < valueGuardTTL {
+		return valueGuardStore.vals, true
 	}
 	ensureCredential()
 	cat, err := catalog.Select("auto", vault.NewRunner(), "")
@@ -328,19 +333,29 @@ func guardValues() []string {
 		if v, e := vault.AllSecretValues(vault.NewRunner(), cat.Provider()); e == nil {
 			valueGuardStore.vals = v
 			valueGuardStore.loadedAt = time.Now()
+			valueGuardStore.loaded = true
+			return v, true
 		} else {
 			dbg("guard refresh: %v", e)
 		}
 	} else {
 		dbg("guard select: %v", err)
 	}
-	return valueGuardStore.vals
+	if valueGuardStore.loaded {
+		return valueGuardStore.vals, true // serve last good snapshot through a transient failure
+	}
+	return nil, false // never loaded — the guard cannot verify; caller fails closed
 }
 
 // handleScan redacts text against every vault value the service can read and returns the
-// redacted text (the matched VALUES never cross the wire).
+// redacted text (the matched VALUES never cross the wire). If the value store could never
+// be loaded it returns an error so the client fails closed instead of leaking.
 func handleScan(text string) projection.Response {
-	red, n := seen.Redact(text, guardValues())
+	vals, ok := guardValues()
+	if !ok {
+		return projection.Response{Error: "value store unavailable"}
+	}
+	red, n := seen.Redact(text, vals)
 	return projection.Response{OK: true, Found: n > 0, Redacted: red}
 }
 

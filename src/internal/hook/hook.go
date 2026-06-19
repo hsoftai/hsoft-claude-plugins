@@ -98,6 +98,13 @@ type Config struct {
 	// ShellTools are extra tool names (beyond "Bash" and the built-in MCP shell
 	// pattern) to treat as command-execution tools, from the shell_tools option.
 	ShellTools []string
+	// RequireGuard makes the known-value redaction guard FAIL CLOSED: when the value
+	// store is unavailable (e.g. on Windows the sandbox-dlp service — the sole holder of
+	// the vault values — is down), a prompt, tool input, or tool output cannot be cleared
+	// and is blocked instead of allowed. Set where the guard is mandatory and there is no
+	// local fallback (Windows + redaction guard on), so a crashed service can never
+	// silently let a secret reach the model.
+	RequireGuard bool
 }
 
 // CoworkAnchor mints, per command, the trust anchor for a fetch that will run in
@@ -159,12 +166,57 @@ func NewHandler(cfg Config, eng *detect.Engine, red *redact.Redactor, vault Reso
 // (no disk values) and is only paid when the cache missed — the common case (truly
 // clean text) is a single inexpensive re-resolve, and a real hit short-circuits it.
 func (h *Handler) knownInText(session, text string) bool {
-	if found, _, ok := h.cache.Scan(session, text); ok && found {
-		return true // cache hit is authoritative; never an amnesiac false negative
+	return h.checkGuard(session, text) == guardHit
+}
+
+// guardStatus is the outcome of checking a text against the known-value guard.
+type guardStatus int
+
+const (
+	guardClean       guardStatus = iota // verified: no known secret value present
+	guardHit                            // a known secret value is present (block/deny/redact)
+	guardUnavailable                    // could NOT verify (store down) and no fallback — fail closed
+)
+
+// checkGuard reports whether text carries a resolved/known secret value. A cache HIT is
+// authoritative (a positive is never an amnesiac false negative). On a cache MISS we
+// corroborate against the durable reference ledger. When the cache is UNAVAILABLE:
+// without a mandatory guard we fall back to the ledger (Unix, where the local cache
+// normally works); with RequireGuard set (Windows, where the sandbox-dlp service is the
+// only value store and there is no local fallback) we cannot verify, so we return
+// guardUnavailable and the caller FAILS CLOSED — a down service can never silently leak.
+func (h *Handler) checkGuard(session, text string) guardStatus {
+	found, _, ok := h.cache.Scan(session, text)
+	if ok {
+		if found {
+			return guardHit
+		}
+		return guardClean // cache authoritative
 	}
-	// Cache unavailable OR cache reported "not found": corroborate against the
-	// durable reference ledger so an amnesiac (restarted) daemon cannot fail open.
-	return seen.Contains(text, h.sessionValues(session))
+	// Cache unavailable. On Windows the service is the sole store with no local fallback.
+	if h.cfg.RequireGuard {
+		return guardUnavailable
+	}
+	if seen.Contains(text, h.sessionValues(session)) {
+		return guardHit
+	}
+	return guardClean
+}
+
+// guardUnavailableOutput is the fail-closed decision when the mandatory redaction guard
+// cannot verify a text (the value store / sandbox-dlp service is down).
+func guardUnavailableBlock(event string) Output {
+	msg := "🛑 secrets-guard: el servicio de protección (sandbox-dlp) no está disponible, " +
+		"así que no se puede garantizar que no se filtre un secreto al modelo. Se bloquea por " +
+		"seguridad (fail-closed). Inicia el servicio sandbox-dlp (o ejecuta su instalador) y reintenta."
+	if event == "PreToolUse" {
+		return Output{HookSpecificOutput: &HookSpecificOutput{
+			HookEventName:            "PreToolUse",
+			PermissionDecision:       "deny",
+			PermissionDecisionReason: msg,
+		}}
+	}
+	return Output{Decision: "block", Reason: "secrets-guard: DLP guard unavailable (fail-closed)", SystemMessage: msg}
 }
 
 // Handle routes an Input to the matching event handler.
@@ -204,7 +256,8 @@ func (h *Handler) handlePrompt(in Input) Output {
 	// proactive guard, every vault value is preloaded into the session cache, so this
 	// blocks a pasted secret even when it matches no heuristic detector pattern. The
 	// detector scan below is the additional, tunable best-effort layer.
-	if h.knownInText(in.SessionID, in.Prompt) {
+	switch h.checkGuard(in.SessionID, in.Prompt) {
+	case guardHit:
 		h.Last = Decision{Event: "UserPromptSubmit", Action: "block", Count: 1}
 		return Output{
 			Decision: "block",
@@ -212,6 +265,9 @@ func (h *Handler) handlePrompt(in Input) Output {
 			SystemMessage: "🛑 secrets-guard bloqueó el envío: el prompt contiene el valor de una contraseña de tu bóveda. " +
 				"El modelo no debe ver contraseñas: ponla en un archivo .env local y deja que tus scripts la lean de ahí; nunca la pegues en el chat.",
 		}
+	case guardUnavailable:
+		h.Last = Decision{Event: "UserPromptSubmit", Action: "block"}
+		return guardUnavailableBlock("UserPromptSubmit")
 	}
 
 	findings := h.eng.Scan(in.Prompt)
@@ -257,13 +313,17 @@ func (h *Handler) handlePreTool(in Input) Output {
 	// 0) The model must never handle a resolved secret value directly. If the
 	// tool input contains a value already resolved this session (in any
 	// encoding), deny it — the model should use the reference instead.
-	if h.knownInText(in.SessionID, joined) {
+	switch h.checkGuard(in.SessionID, joined) {
+	case guardHit:
 		h.Last = Decision{Event: "PreToolUse", Action: "deny"}
 		return Output{HookSpecificOutput: &HookSpecificOutput{
 			HookEventName:            "PreToolUse",
 			PermissionDecision:       "deny",
 			PermissionDecisionReason: "secrets-guard: la entrada contiene un valor de secreto ya resuelto en esta sesión. No manejes el valor en texto plano; usa la referencia de bóveda (op://… / keeper://…) y deja que el hook lo resuelva al ejecutar.",
 		}}
+	case guardUnavailable:
+		h.Last = Decision{Event: "PreToolUse", Action: "deny"}
+		return guardUnavailableBlock("PreToolUse")
 	}
 
 	// 1) A plaintext secret in the tool input (vault refs are ignored by detect).
@@ -478,7 +538,8 @@ func (h *Handler) handlePostTool(in Input) Output {
 	// In sandbox mode the inline redact-stream wrap is disabled, so this is the
 	// ONLY thing standing between a rendered vault secret printed by a Bash command
 	// and the transcript — gating it on ToolOutputMode would silently leak it.
-	if h.knownInText(in.SessionID, text) {
+	switch h.checkGuard(in.SessionID, text) {
+	case guardHit:
 		h.Last = Decision{Event: "PostToolUse", Action: "block", Count: 1}
 		return Output{
 			Decision: "block",
@@ -486,6 +547,9 @@ func (h *Handler) handlePostTool(in Input) Output {
 			SystemMessage: "🛑 secrets-guard retuvo la salida: contiene un secreto ya resuelto en esta sesión " +
 				"(posible fuga al leerlo de vuelta). El valor no se entregó al modelo; usa la referencia de bóveda.",
 		}
+	case guardUnavailable:
+		h.Last = Decision{Event: "PostToolUse", Action: "block"}
+		return guardUnavailableBlock("PostToolUse")
 	}
 
 	// Detector-based scanning/blocking of arbitrary (not session-resolved) secrets

@@ -3,7 +3,11 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
+	"time"
 
 	"github.com/hsoftai/hsoft-claude-plugins/internal/cache"
 	"github.com/hsoftai/hsoft-claude-plugins/internal/catalog"
@@ -129,22 +133,51 @@ func (serviceCache) Scan(_, text string) (found bool, redacted string, ok bool) 
 
 func (serviceCache) Shutdown(string) {}
 
-// useServiceGuard reports whether the redaction guard should run in the service. On
-// Windows the per-user unix-socket cache is unavailable and the client holds no
-// credential, so whenever the service answers (it holds every vault value for OpScan)
-// the guard runs there. This is INDEPENDENT of KERNEL_DLP / sandbox: the guard is the
-// always-on core (inspect every prompt and tool I/O) even when reference rendering is
-// off — it only needs the service to be reachable.
-func useServiceGuard(cfg config.Config) bool {
-	return runtime.GOOS == "windows" && !cfg.IsCowork && dlpipc.Healthy()
+// requireServiceGuard reports whether the redaction guard MUST run in the sandbox-dlp
+// service: on Windows (not Cowork) with the guard enabled, the service is the sole holder
+// of the vault values and the per-user socket cache does not apply, so there is no local
+// fallback. This is INDEPENDENT of KERNEL_DLP / sandbox — the guard is the always-on core
+// even when reference rendering is off. When it returns true the hook is told to FAIL
+// CLOSED if the service is unreachable (a crashed service must never silently leak).
+func requireServiceGuard(cfg config.Config) bool {
+	return runtime.GOOS == "windows" && !cfg.IsCowork && cfg.PreloadEnabled()
 }
 
 // valueGuard chooses where the resolved/known-value redaction guard lives: the service
 // on Windows (it holds the values; the local socket cache does not apply there), the
-// per-session in-memory cache otherwise.
+// per-session in-memory cache otherwise. On the service path it best-effort (re)starts
+// the service if it is down, so a transient crash self-heals.
 func valueGuard(cfg config.Config) hook.SecretCache {
-	if useServiceGuard(cfg) {
+	if requireServiceGuard(cfg) {
+		ensureServiceRunning()
 		return serviceCache{}
 	}
 	return cache.New()
+}
+
+// ensureServiceRunning best-effort (re)starts the installed sandbox-dlp service when it is
+// not answering, so a mid-session crash recovers without waiting for the next logon. No-op
+// off Windows, when the service already answers, or when it is not installed (then the
+// hook fails closed). Briefly waits so the current hook invocation can use the guard.
+func ensureServiceRunning() {
+	if runtime.GOOS != "windows" || dlpipc.Healthy() {
+		return
+	}
+	exe := filepath.Join(os.Getenv("LOCALAPPDATA"), "secrets-guard", "sandbox-dlp", "sandbox-dlp.exe")
+	if _, err := os.Stat(exe); err != nil {
+		return // not installed — nothing to start
+	}
+	cmd := exec.Command(exe, "serve")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
+	cache.Detach(cmd)
+	if err := cmd.Start(); err != nil {
+		return
+	}
+	_ = cmd.Process.Release()
+	for i := 0; i < 15; i++ { // ~1.5s for this call to use the guard; else next call retries
+		if dlpipc.Healthy() {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }

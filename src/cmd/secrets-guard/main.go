@@ -727,6 +727,10 @@ func toHookConfig(c config.Config, vaultName string) hook.Config {
 		// so `sandbox=auto` must still wrap.
 		SandboxMode: c.SandboxWrap(vaultName != "none" || kernelDLPActive(c)),
 		ShellTools:  splitList(c.ShellTools),
+		// Fail closed when the redaction guard is mandatory but has no local fallback
+		// (Windows: the sandbox-dlp service is the sole value store). A down service must
+		// never silently let a secret reach the model.
+		RequireGuard: requireServiceGuard(c),
 	}
 }
 

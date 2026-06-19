@@ -10,6 +10,43 @@ Paths:
 - Linux: `/etc/claude-code/managed-settings.json`
 - Windows: `C:\ProgramData\ClaudeCode\managed-settings.json`
 
+## Installation profiles: full vs light
+
+secrets-guard has two deployment profiles. Both force-enable the plugin, disable bypass
+permissions, and redact secrets in prompts and tool I/O. They differ in whether the
+Windows `sandbox-dlp` service (which requires the WinFsp driver) is installed.
+
+- **Full (recommended) — complete vault guard.** Installs the `sandbox-dlp` service
+  (WinFsp). The service holds the vault credential and every vault value in memory, so the
+  guard blocks/redacts *any* Keeper/1Password value (in any encoding) before it reaches the
+  model — even values that match no detector pattern. If the service is unreachable the
+  guard **fails closed**. `SANDBOX` stays `off` (redaction-only) unless you also want
+  per-process reference rendering (`SANDBOX=on`). Set `KERNEL_DLP=auto`,
+  `PRELOAD_SECRETS=auto`.
+
+- **Light — no WinFsp / no service.** Only the plugin + `managed-settings.json`; you do
+  **not** run `sandbox-dlp-setup.ps1`, so there is no kernel driver and no elevation for
+  WinFsp. Redaction falls back to the built-in **secret-pattern detector** (API keys,
+  tokens, AWS keys, private keys, …) plus any value resolved during the session. Set
+  `KERNEL_DLP=off` and `PRELOAD_SECRETS=off`. Trade-off: a Keeper password that matches no
+  known pattern is **not** guaranteed to be redacted — use the full profile for that
+  guarantee. The `env` block for the light profile:
+
+  ```json
+  "env": {
+    "CLAUDE_PLUGIN_OPTION_VAULT_PROVIDER": "keeper",
+    "CLAUDE_PLUGIN_OPTION_BLOCK_ON_PROMPT_SECRET": "true",
+    "CLAUDE_PLUGIN_OPTION_TOOL_INPUT_POLICY": "deny",
+    "CLAUDE_PLUGIN_OPTION_TOOL_OUTPUT_MODE": "redact",
+    "CLAUDE_PLUGIN_OPTION_SANDBOX": "off",
+    "CLAUDE_PLUGIN_OPTION_KERNEL_DLP": "off",
+    "CLAUDE_PLUGIN_OPTION_PRELOAD_SECRETS": "off"
+  }
+  ```
+
+  With the enforcement script: `enforce-secrets-guard.ps1 -KernelDlp off -PreloadSecrets off`
+  (and skip `sandbox-dlp-setup.ps1`).
+
 ## Windows one-shot enforcement script
 
 On Windows you can write the managed file (and disable "bypass permissions" mode) in one
