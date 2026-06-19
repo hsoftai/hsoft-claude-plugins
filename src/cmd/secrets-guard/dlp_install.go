@@ -81,13 +81,16 @@ func maybeTriggerDLPInstall(cfg config.Config) {
 	if installAttemptedRecently() {
 		return
 	}
-	markInstallAttempt()
 	fmt.Fprintln(os.Stderr, "secrets-guard: kernel-DLP (sandbox-dlp + WinFsp) is not installed; "+
-		"file rendering falls back to in-place. Installing now (approve the elevation prompt) "+
-		"or run: secrets-guard dlp-install")
+		"the redaction guard degrades to the pattern detector. Installing now (approve the "+
+		"elevation prompt) or run: secrets-guard dlp-install")
 	if err := installSandboxDLP(cfg); err != nil {
+		// Do NOT throttle a FAILED attempt (e.g. a transient download error): let the next
+		// session retry instead of waiting out the 24h window.
 		fmt.Fprintln(os.Stderr, "secrets-guard: could not launch installer:", err)
+		return
 	}
+	markInstallAttempt() // only throttle once the installer has actually launched
 }
 
 // installSandboxDLP downloads the installer (checksum-verified when a .sha256 is present)
