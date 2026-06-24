@@ -18,3 +18,7 @@ func ownedByUs(fi fs.FileInfo) bool {
 	}
 	return int(st.Uid) == os.Getuid()
 }
+
+// permOK enforces the 0700 (no group/other access) requirement on Unix, where a
+// world-known /tmp path could otherwise be pre-planted by another user.
+func permOK(fi fs.FileInfo) bool { return fi.Mode().Perm()&0o077 == 0 }

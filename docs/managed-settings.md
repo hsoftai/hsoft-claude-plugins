@@ -10,42 +10,23 @@ Paths:
 - Linux: `/etc/claude-code/managed-settings.json`
 - Windows: `C:\ProgramData\ClaudeCode\managed-settings.json`
 
-## Installation profiles: full vs light
+## How it works (local model — no WinFsp, no admin)
 
-secrets-guard has two deployment profiles. Both force-enable the plugin, disable bypass
-permissions, and redact secrets in prompts and tool I/O. They differ in whether the
-Windows `sandbox-dlp` service (which requires the WinFsp driver) is installed.
+As of v0.6.0 secrets-guard runs **entirely per-user with no system service, no WinFsp
+driver, and no administrator rights**. The redaction guard reads the user's own vault
+through their local `ksm` / `op` profile (in its default location — it is not moved or
+deleted), loads every value into a per-session in-memory cache at session start, and
+redacts/blocks any of those values (in any encoding) in prompts and tool input/output
+before they reach the model. If the vault profile isn't initialized, the guard degrades to
+the built-in **secret-pattern detector** and never blocks normal use.
 
-- **Full (recommended) — complete vault guard.** Installs the `sandbox-dlp` service
-  (WinFsp). The service holds the vault credential and every vault value in memory, so the
-  guard blocks/redacts *any* Keeper/1Password value (in any encoding) before it reaches the
-  model — even values that match no detector pattern. If the service is unreachable the
-  guard **fails closed**. `SANDBOX` stays `off` (redaction-only) unless you also want
-  per-process reference rendering (`SANDBOX=on`). Set `KERNEL_DLP=auto`,
-  `PRELOAD_SECRETS=auto`.
+Prerequisite per user: the Keeper `ksm` CLI installed and a profile initialized
+(`ksm profile init <token>`). That needs no admin. There is nothing machine-wide to
+install; the previous `sandbox-dlp`/WinFsp service is no longer used.
 
-- **Light — no WinFsp / no service.** Only the plugin + `managed-settings.json`; you do
-  **not** run `sandbox-dlp-setup.ps1`, so there is no kernel driver and no elevation for
-  WinFsp. Redaction falls back to the built-in **secret-pattern detector** (API keys,
-  tokens, AWS keys, private keys, …) plus any value resolved during the session. Set
-  `KERNEL_DLP=off` and `PRELOAD_SECRETS=off`. Trade-off: a Keeper password that matches no
-  known pattern is **not** guaranteed to be redacted — use the full profile for that
-  guarantee. The `env` block for the light profile:
-
-  ```json
-  "env": {
-    "CLAUDE_PLUGIN_OPTION_VAULT_PROVIDER": "keeper",
-    "CLAUDE_PLUGIN_OPTION_BLOCK_ON_PROMPT_SECRET": "true",
-    "CLAUDE_PLUGIN_OPTION_TOOL_INPUT_POLICY": "deny",
-    "CLAUDE_PLUGIN_OPTION_TOOL_OUTPUT_MODE": "redact",
-    "CLAUDE_PLUGIN_OPTION_SANDBOX": "off",
-    "CLAUDE_PLUGIN_OPTION_KERNEL_DLP": "off",
-    "CLAUDE_PLUGIN_OPTION_PRELOAD_SECRETS": "off"
-  }
-  ```
-
-  With the enforcement script: `enforce-secrets-guard.ps1 -KernelDlp off -PreloadSecrets off`
-  (and skip `sandbox-dlp-setup.ps1`).
+`SANDBOX` stays `off` by default (redaction-only); `SANDBOX=on` enables in-place reference
+rendering. `KERNEL_DLP` is deprecated/ignored. `GUARD_REQUIRED=on` makes the guard fail
+closed if the vault is unavailable (strict); the default `auto` degrades to the detector.
 
 ## Windows one-shot enforcement script
 
@@ -57,9 +38,8 @@ step with `installers/windows/enforce-secrets-guard.ps1`. It self-elevates and w
 powershell -ExecutionPolicy Bypass -Command "iwr -UseBasicParsing https://raw.githubusercontent.com/hsoftai/hsoft-claude-plugins/main/installers/windows/enforce-secrets-guard.ps1 -OutFile $env:TEMP\enforce-secrets-guard.ps1; & $env:TEMP\enforce-secrets-guard.ps1"
 ```
 
-Pass `-KsmConfig '<base64>'` to embed the Keeper credential, or leave it out to let the
-`sandbox-dlp` service ingest the local `ksm` profile. For per-process file rendering also
-run `installers/windows/sandbox-dlp-setup.ps1` (installs WinFsp + the service).
+Each user then needs the `ksm` CLI with an initialized profile (no admin); the redaction
+guard uses it directly. There is no WinFsp/service to install.
 
 ## Full enforcement example
 

@@ -65,8 +65,8 @@ func verifyOwned(dir string) bool {
 	if err != nil || !fi.IsDir() {
 		return false
 	}
-	if fi.Mode().Perm()&0o077 != 0 {
-		return false // group/other have access — not exclusively ours
+	if !permOK(fi) {
+		return false // (Unix) group/other have access — not exclusively ours
 	}
 	return ownedByUs(fi) // platform check: refuse a dir owned by another user
 }

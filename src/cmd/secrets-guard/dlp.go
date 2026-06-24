@@ -31,11 +31,13 @@ import (
 //     (measured), fuse-t reports caller pid 0, and FSKit exposes no caller identity.
 //     macOS therefore keeps the in-place renderer (renderFiles in
 //     sandbox_render_other.go) with its restore + crash-recovery journal.
-func kernelDLPActive(cfg config.Config) bool {
-	if cfg.KernelDLP == "off" || cfg.IsCowork {
-		return false
-	}
-	return runtime.GOOS == "windows"
+// NOTE: WinFsp / the sandbox-dlp kernel-DLP service has been removed. secrets-guard now
+// runs entirely locally — it reads vault values through the user's own `ksm` profile and
+// holds them in the per-session in-memory cache for redaction. There is no per-process
+// file-rendering service and nothing that requires administrator rights. kernelDLPActive
+// therefore always returns false; the sandbox (when enabled) uses the in-place renderer.
+func kernelDLPActive(config.Config) bool {
+	return false
 }
 
 // shortTmp returns a base temp dir with a short path (mount/socket paths have OS length

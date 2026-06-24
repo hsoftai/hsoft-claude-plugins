@@ -1,7 +1,7 @@
 {
   "name": "secrets-guard",
   "displayName": "secrets-guard",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "Keep secrets out of the model: block plaintext secrets in prompts, resolve vault references (Keeper/1Password) into tool input, and redact secrets leaked in tool output.",
   "author": {
     "name": "Humphrey Consulting Group"
@@ -126,9 +126,9 @@
     },
     "kernel_dlp": {
       "type": "string",
-      "title": "Kernel-enforced file rendering (Windows)",
-      "description": "On Windows, render secret values into files through the manually-installed sandbox-dlp system service (a user-mode provider over WinFsp, which reports the requesting process id) so the rendered value is readable ONLY by the secrets-guard command's process subtree and NEVER touches disk — every other process reading the file sees the original references. 'auto' (default) uses the service when installed and falls back to the in-place renderer otherwise; 'require' is provider-only and fails closed (skips file rendering rather than writing a value to disk) when the service is absent; 'off' keeps the in-place renderer. Ignored on Linux and in Cowork (the mount-namespace bind-mount already isolates) and on macOS, where SIP prevents any robust kext-free per-process substitution, so macOS uses the in-place renderer with its crash-recovery journal.",
-      "default": "auto"
+      "title": "Kernel-enforced file rendering (deprecated, no-op)",
+      "description": "DEPRECATED / no-op. secrets-guard no longer uses WinFsp or a system service: it runs entirely per-user (the local ksm/op profile + an in-memory cache) and needs no administrator rights. This option is kept only for backward compatibility and is ignored. The sandbox, when enabled, uses the in-place renderer with a crash-recovery journal.",
+      "default": "off"
     },
     "dlp_install_source": {
       "type": "string",

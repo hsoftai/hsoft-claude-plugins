@@ -145,17 +145,14 @@ func runHook() {
 		if cfg.IsCowork {
 			spawnCwHost(cfg, in.SessionID)
 		}
-		// Windows: if kernel DLP is enabled but the sandbox-dlp service/WinFsp is not
-		// installed, surface a one-time notice and best-effort launch the installer
-		// (UAC). No-op on macOS/Linux and in Cowork.
-		maybeTriggerDLPInstall(cfg)
 		// Proactive redaction guard: preload every vault value into this session's
 		// in-memory cache so any later prompt/tool/file-read containing a secret is
 		// redacted or blocked before reaching the model. Detached so it never delays
 		// session start; no-op when disabled or when no vault/service can supply values.
-		// On Windows kernel-DLP the guard runs in the service (it holds the values and
-		// the client cache is unavailable), so no client-side preload is needed there.
-		if cfg.PreloadEnabled() && !useServiceVault(cfg) {
+		// Preload every vault value into the per-session in-memory cache so the redaction
+		// guard can block/redact any of them — on every platform (the cache now works on
+		// Windows too). Detached so it never delays session start; no-op without a vault.
+		if cfg.PreloadEnabled() {
 			spawnPreloadSecrets(in.SessionID)
 		}
 		return // no stdout → nothing injected into context
@@ -165,8 +162,7 @@ func runHook() {
 	if err != nil {
 		self = ""
 	}
-	useService, failClosed := guardMode(cfg)
-	h := hook.NewHandler(toHookConfig(cfg, resolver.ProviderName(), failClosed), eng, red, resolver, valueGuard(useService), self)
+	h := hook.NewHandler(toHookConfig(cfg, resolver.ProviderName(), cfg.GuardRequired == "on"), eng, red, resolver, valueGuard(), self)
 	if cfg.IsCowork {
 		h.SetCoworkAnchor(coworkAnchor{})
 	}
@@ -252,8 +248,7 @@ func runRedactStream() {
 	// encoding). Prefer the in-memory cache daemon; fall back to re-resolving the
 	// recorded references in ephemeral memory if the daemon is unavailable.
 	if session := os.Getenv("SG_SESSION"); session != "" {
-		useService, _ := guardMode(cfg)
-		if _, red, ok := valueGuard(useService).Scan(session, text); ok {
+		if _, red, ok := valueGuard().Scan(session, text); ok {
 			text = red
 		} else if paths := seen.LoadPaths(session); len(paths) > 0 {
 			if resolver, err := vault.Select(cfg.VaultProvider, vault.NewRunner(), cfg.OPAccount); err == nil {
