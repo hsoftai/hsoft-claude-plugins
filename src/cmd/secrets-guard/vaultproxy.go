@@ -126,9 +126,15 @@ func (serviceCache) Scan(_, text string) (found bool, redacted string, ok bool) 
 		Scan: &projection.ScanRequest{Text: text},
 	})
 	if err != nil || !resp.OK {
-		return false, text, false // service unreachable: caller falls back
+		return false, text, false // service unreachable/incompatible: caller falls back to the detector
 	}
-	return resp.Found, resp.Redacted, true
+	if !resp.Found {
+		// Nothing matched: return the ORIGINAL text. Never trust a (possibly empty or
+		// malformed) Redacted when Found is false — a misbehaving or impostor service must
+		// not be able to blank tool output by replying {"ok":true} with no redacted field.
+		return false, text, true
+	}
+	return true, resp.Redacted, true
 }
 
 func (serviceCache) Shutdown(string) {}
