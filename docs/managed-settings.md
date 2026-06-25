@@ -64,8 +64,8 @@ guard uses it directly. There is no WinFsp/service to install.
     "CLAUDE_PLUGIN_OPTION_TOOL_OUTPUT_MODE": "redact",
     "CLAUDE_PLUGIN_OPTION_AUDIT_LOG_PATH": "/var/log/secrets-guard/audit.log",
     "CLAUDE_PLUGIN_OPTION_SANDBOX": "off",
-    "CLAUDE_PLUGIN_OPTION_KERNEL_DLP": "auto",
     "CLAUDE_PLUGIN_OPTION_PRELOAD_SECRETS": "auto",
+    "CLAUDE_PLUGIN_OPTION_GUARD_REQUIRED": "auto",
     "KSM_CONFIG": "<base64-keeper-config>"
   }
 }
@@ -90,21 +90,18 @@ What each key does:
   model only ever sees the redacted form. `on` enables reference rendering; `auto`
   enables it wherever a vault can resolve. The redaction guard runs regardless of this
   setting.
-- **`KERNEL_DLP`** (`auto` | `require` | `off`, **Windows only**) — selects the WinFsp
-  `sandbox-dlp` service for per-process file rendering. `off` keeps the in-place
-  renderer; `require` fails closed when the service is absent (never writes a value to
-  disk); `auto` uses the service when present. Set `off` to disable the kernel-DLP path
-  on Windows independently of `SANDBOX`.
-- **`GUARD_REQUIRED`** (`auto` | `on` | `off`) — fail-closed policy when the redaction
-  guard cannot verify a text (on Windows: the `sandbox-dlp` service is unreachable).
-  `auto` (default) fails closed only where the service is actually running, so a machine
-  where it was never provisioned (e.g. WinFsp not installed) degrades to the pattern
-  detector instead of blocking every prompt and tool — an incomplete install does not
-  brick the CLI. `on` always fails closed when the guard is unavailable (strict; for
-  fleets that guarantee the service is installed). `off` never fails closed.
+- **`KERNEL_DLP`** — **deprecated / no-op.** The previous WinFsp `sandbox-dlp` service has
+  been removed; the guard runs entirely per-user (see "How it works" above). This option
+  is ignored if present; remove it from your settings.
+- **`GUARD_REQUIRED`** (`auto` | `on` | `off`) — fail-closed policy when the local vault
+  is unavailable. `auto` (default) degrades to the built-in pattern detector when the
+  user's `ksm` / `op` profile isn't initialized, so an un-provisioned machine does not
+  block every prompt and tool. `on` always fails closed when the vault/guard is
+  unavailable (strict; for fleets that guarantee each user has an initialized profile).
+  `off` never fails closed.
 - **`PRELOAD_SECRETS`** (`auto` | `on` | `off`) — the proactive full-vault redaction
-  guard. When enabled (default), every value the vault exposes is held in memory (in the
-  per-session cache on macOS/Linux, in the `sandbox-dlp` service on Windows) and any
+  guard. When enabled (default), every value the user's local vault exposes is loaded into
+  a per-session in-memory cache at session start (on Linux, macOS **and Windows**) and any
   prompt, tool input, tool output, or file read containing one of those values — in any
   encoding — is redacted or blocked before it reaches the model, even if the value was
   never referenced. Values never touch disk and never reach the model. `off` limits the
@@ -119,10 +116,10 @@ What each key does:
 
 ## Vault credentials on the fleet
 
-The vault CLI is a **fleet prerequisite, provisioned by MDM — it is NOT installed by the
-plugin or by the Windows `sandbox-dlp` installer** (which only ships WinFsp, the
-`sandbox-dlp` service, and the `secrets-guard` binary). Push the CLI and its credentials
-the same way you push `managed-settings.json`:
+The vault CLI is a **per-user prerequisite** (provisionable by MDM) — it is **not** the
+vault value store, and the plugin does not install it. The `secrets-guard` CLI itself is
+installed per-user automatically by the plugin's SessionStart hook (no admin). Push the
+vault CLI and its credentials the same way you push `managed-settings.json`:
 
 - **Keeper:** install the `ksm` CLI on `PATH` (MDM package; on Windows the Inno-Setup EXE
   `KeeperSecurity.KeeperSecretsManager`). Redeem a one-time token once, store the resulting

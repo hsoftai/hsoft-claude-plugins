@@ -6,26 +6,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added
-- **Windows kernel-level DLP (`sandbox-dlp`), in progress.** A new per-user system
-  service that renders secret values into files through a **WinFsp** user-mode provider,
-  so the rendered value is readable **only** by the secrets-guard command's process
-  subtree and **never touches disk** — every other process reading the file sees the
-  original references. New `kernel_dlp` option (`auto`/`require`/`off`, Windows only) and
-  `dlp_install_source`; `secrets-guard dlp-status` / `dlp-install`; a SessionStart
-  detect-and-trigger that surfaces a one-time notice and best-effort launches the
-  installer (UAC). The OS-independent core (`internal/projection`, `internal/dlpipc`), the
-  client wiring, the process-subtree oracles, and the named-pipe/unix-socket control
-  servers are implemented and tested; the WinFsp provider is written and exercised on a
-  Windows host (cgo + WinFsp can't be built from macOS). See `docs/sandbox-dlp.md`.
+## [0.6.0] - 2026-06-25
 
-### Decided
-- **macOS keeps the in-place renderer; the strong per-process + never-on-disk property is
-  Windows-only.** Empirically, every kext-free per-process file-content mechanism on macOS
-  is defeated by SIP: fuse-t reports caller pid 0, FSKit exposes no caller identity,
-  EndpointSecurity can't rewrite reads, and DYLD interposition is stripped through system
-  shells (and the command wrap goes through `sh`). The only robust macOS option is a kext
-  (macFUSE), which needs a reduced-security install end users can't be asked to do.
+### Removed
+- **Removed the Windows kernel-DLP path entirely: no more WinFsp driver and no more
+  `sandbox-dlp` system service.** The `installers/windows/sandbox-dlp-setup.ps1` script and
+  `docs/sandbox-dlp.md` are deleted, and secrets-guard no longer requires administrator
+  rights or installs anything machine-wide. The `kernel_dlp` option is **deprecated and a
+  no-op** (ignored if present).
+
+### Changed
+- **secrets-guard now runs entirely per-user (local model).** The redaction guard reads the
+  user's own vault through their local `ksm` / `op` profile (in its default location — the
+  profile is not moved, deleted, or DPAPI-protected), loads every value into a per-session
+  **in-memory cache** at session start, and redacts/blocks those values (in any encoding) in
+  prompts and tool input/output before they reach the model. If the vault profile isn't
+  initialized, the guard degrades to the built-in secret-pattern detector and never blocks
+  normal use. The per-session in-memory cache that backs the proactive full-vault guard now
+  works on **Windows** too (previously the value store lived in the Windows service).
+- **`dlp-install`, `doctor`, and `dlp-status` are now local** — they install/clean up the
+  per-user CLI footprint and report the local vault/guard state, with no service to query.
+
+### Added
+- **`secrets-guard install` is now a descriptive, idempotent installer.** It installs the
+  CLI on PATH, cleans up any legacy components (the old service/driver footprint), checks the
+  vault, warms the in-memory cache, and reports clearly with clean/dirty detection. Re-running
+  is safe.
+- **`secrets-guard uninstall`** removes the full per-user secrets-guard footprint (no admin).
+- **`GUARD_REQUIRED`** option (`auto` | `on` | `off`, default `auto`) — fail-closed policy
+  when the local vault is unavailable: `auto` degrades to the pattern detector, `on` fails
+  closed, `off` never fails closed.
 
 ## [0.4.2] - 2026-06-15
 

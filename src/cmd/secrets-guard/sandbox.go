@@ -183,12 +183,8 @@ func renderAndExec(cfg config.Config, cmd []string, withFiles bool) {
 	// Resolve the unescaped references (if any). The render pass runs regardless, so
 	// that an escaped occurrence (\op://…) still has its backslash stripped — matching
 	// the inline `command_references` escape — even when nothing needs fetching.
-	// In the Windows kernel-DLP path the CLIENT holds no vault credential and does NOT
-	// resolve: references in ref-files are resolved by the sandbox-dlp SERVICE (which owns
-	// the credential) and served only to the command's subtree. Env/command references are
-	// left literal there. On every other path the client resolves locally as before.
 	var values map[string]string
-	if len(refs) > 0 && !kernelDLPActive(cfg) {
+	if len(refs) > 0 {
 		var err error
 		values, err = sandboxResolve(cfg, refs)
 		if err != nil {
@@ -210,29 +206,14 @@ func renderAndExec(cfg config.Config, cmd []string, withFiles bool) {
 		}
 	}
 
-	// 2) Render FILES. Three strategies, in order of strength:
-	//   - kernel DLP (macOS/Windows, sandbox-dlp installed): the rendered content is
-	//     served by the service ONLY to this command's process subtree; the value never
-	//     touches disk. The command runs with its cwd inside the service mount.
-	//   - in-place (Linux bind-mount = value never on disk; macOS/Windows fallback =
-	//     value briefly on the real file, restored after, crash-recovery journal).
-	//   - require + service down: skip file rendering entirely (fail-closed; no value on
-	//     disk) — env and command are still rendered.
+	// 2) Render FILES in place: Linux uses a private bind-mount (the value never touches
+	// the real disk); macOS/Windows render the value onto the real file for the command's
+	// duration and restore the original reference right after, backed by a crash-recovery
+	// journal so a hard kill never leaves a value on disk.
 	restore := func() {}
 	childDir := ""
 	if withFiles && len(files) > 0 {
-		if kernelDLPActive(cfg) {
-			if mp, dereg, ok := dlpRender(files); ok {
-				restore, childDir = dereg, mp
-			} else if cfg.KernelDLP == "require" {
-				fmt.Fprintln(os.Stderr, "secrets-guard sandbox: sandbox-dlp no disponible; "+
-					"se omite el renderizado de archivos (kernel_dlp=require, fail-closed)")
-			} else {
-				restore = inPlaceRender(files, values)
-			}
-		} else {
-			restore = inPlaceRender(files, values)
-		}
+		restore = inPlaceRender(files, values)
 	}
 
 	// Register resolved values so a rendered value printed in the output is caught by

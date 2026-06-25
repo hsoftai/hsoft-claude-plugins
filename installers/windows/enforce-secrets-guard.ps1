@@ -6,7 +6,9 @@
   managed-settings.json is Claude Code's highest-precedence settings layer: users and
   projects cannot override it. On Windows it lives at:
       C:\ProgramData\ClaudeCode\managed-settings.json
-  Writing there requires administrator rights, so this script self-elevates (UAC).
+  This file is a machine path under ProgramData, so writing it requires administrator
+  rights and this script self-elevates (UAC). That admin requirement is ONLY about
+  writing the managed-policy file - secrets-guard itself needs NO admin (see below).
 
   What it enforces:
     - permissions.disableBypassPermissionsMode = "disable"  (no --dangerously-skip / bypass)
@@ -16,10 +18,14 @@
       secrets, redact output, and the proactive full-vault redaction guard ON - so no
       vault value ever reaches the model's context
 
-  After it runs, the NEXT Claude Code start installs/activates the plugin automatically
-  (its SessionStart hook puts the `secrets-guard` CLI on PATH). The Windows kernel-DLP
-  service + WinFsp driver are a separate, elevation-requiring component installed by
-  installers/windows/sandbox-dlp-setup.ps1.
+  How the guard runs (local model, as of v0.6.0): secrets-guard runs ENTIRELY PER-USER -
+  no system service, no WinFsp driver, no administrator rights. The redaction guard reads
+  the user's own vault through their local `ksm` / `op` profile (in its default location),
+  loads every value into a per-session in-memory cache at session start, and redacts/blocks
+  those values in prompts and tool I/O before they reach the model. After this script runs,
+  the NEXT Claude Code start installs/activates the plugin automatically (its SessionStart
+  hook puts the `secrets-guard` CLI on PATH, no admin). Each user just needs the Keeper
+  `ksm` CLI installed and a profile initialized (`ksm profile init <token>`).
 
   Download + run on the target machine:
       powershell -ExecutionPolicy Bypass -Command "iwr -UseBasicParsing https://raw.githubusercontent.com/hsoftai/hsoft-claude-plugins/main/installers/windows/enforce-secrets-guard.ps1 -OutFile $env:TEMP\enforce-secrets-guard.ps1; & $env:TEMP\enforce-secrets-guard.ps1"
@@ -33,22 +39,24 @@ param(
   [ValidateSet("auto", "keeper", "1password")]
   [string]$VaultProvider = "keeper",
 
-  # Optional: the base64 Keeper Secrets Manager config (KSM_CONFIG). Leave empty to let the
-  # sandbox-dlp service ingest the machine's local `ksm` profile on first run instead of
-  # embedding the credential in the (admin-readable) managed file.
+  # Optional: the base64 Keeper Secrets Manager config (KSM_CONFIG). Leave empty to let each
+  # user's local `ksm` profile back the guard instead of embedding the credential in the
+  # (admin-readable) managed file.
   [string]$KsmConfig = "",
 
   # Where the audit log is written. Empty -> auditing left to the plugin default (off).
   [string]$AuditLogPath = "C:\ProgramData\secrets-guard\audit.log",
 
-  # Sandbox / kernel-DLP / proactive redaction guard switches.
+  # Sandbox / proactive redaction guard switches.
   # Sandbox defaults to OFF: the enforced behavior is redaction-only (no reference
   # rendering) - secrets-guard inspects every prompt and tool I/O and never lets a vault
-  # value reach the model. KernelDlp stays auto so the sandbox-dlp service runs and backs
-  # the redaction guard (OpScan) on Windows. PreloadSecrets keeps the guard always on.
-  [ValidateSet("auto", "on", "off")]   [string]$Sandbox        = "off",
-  [ValidateSet("auto", "require", "off")][string]$KernelDlp     = "auto",
-  [ValidateSet("auto", "on", "off")]   [string]$PreloadSecrets = "auto",
+  # value reach the model. SANDBOX=on enables in-place reference rendering. PreloadSecrets
+  # keeps the proactive full-vault guard always on. GuardRequired controls fail-closed
+  # behavior when the local vault is unavailable: auto degrades to the pattern detector,
+  # on fails closed, off never fails closed.
+  [ValidateSet("auto", "on", "off")][string]$Sandbox        = "off",
+  [ValidateSet("auto", "on", "off")][string]$PreloadSecrets = "auto",
+  [ValidateSet("auto", "on", "off")][string]$GuardRequired  = "auto",
 
   # Marketplace repo (override for a fork/mirror).
   [string]$Repo = "hsoftai/hsoft-claude-plugins",
@@ -90,8 +98,8 @@ $pluginEnv = [ordered]@{
   "CLAUDE_PLUGIN_OPTION_TOOL_INPUT_POLICY"      = "deny"
   "CLAUDE_PLUGIN_OPTION_TOOL_OUTPUT_MODE"       = "redact"
   "CLAUDE_PLUGIN_OPTION_SANDBOX"                = $Sandbox
-  "CLAUDE_PLUGIN_OPTION_KERNEL_DLP"             = $KernelDlp
   "CLAUDE_PLUGIN_OPTION_PRELOAD_SECRETS"        = $PreloadSecrets
+  "CLAUDE_PLUGIN_OPTION_GUARD_REQUIRED"         = $GuardRequired
 }
 if ($AuditLogPath) { $pluginEnv["CLAUDE_PLUGIN_OPTION_AUDIT_LOG_PATH"] = $AuditLogPath }
 if ($KsmConfig)    { $pluginEnv["KSM_CONFIG"] = $KsmConfig }
@@ -152,13 +160,14 @@ Write-Host ""
 Step "Done. The policy is active for every Claude Code session on this machine."
 Write-Host @"
 
-Next steps:
-  1. Make sure the Keeper 'ksm' CLI is installed and reachable on PATH, with a profile
-     redeemed (or pass -KsmConfig '<base64>' to embed the credential).
-  2. For Windows kernel-DLP (per-process file rendering), also run:
-       installers\windows\sandbox-dlp-setup.ps1
-     (installs WinFsp + the sandbox-dlp service; requires elevation).
-  3. Open a NEW Claude Code session - the plugin installs and activates automatically.
+Next steps (per user, NO admin):
+  1. Install the Keeper 'ksm' CLI and initialize a profile:
+       winget install KeeperSecurity.KeeperSecretsManager
+       ksm profile init <ONE-TIME-TOKEN>
+     (or pass -KsmConfig '<base64>' to embed the credential in the managed file).
+  2. Open a NEW Claude Code session - the plugin installs and activates automatically
+     (its SessionStart hook puts 'secrets-guard' on PATH and warms the in-memory cache).
+     You can also run 'secrets-guard install' and verify with 'secrets-guard doctor'.
 
 Settings written to: $target
 "@

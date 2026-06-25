@@ -701,11 +701,9 @@ func toHookConfig(c config.Config, vaultName string, failClosed bool) hook.Confi
 		// Cowork uses the sealed-box disk channel (anchor + one-time token).
 		CoworkMode:    c.IsCowork,
 		CoworkIsolate: c.CoworkIsolate,
-		// Wrap Bash commands in `secrets-guard sandbox` where references can be resolved:
-		// either a LOCAL vault is available, or (Windows kernel-DLP) the sandbox-dlp service
-		// resolves server-side — in which case the client deliberately has NO local vault,
-		// so `sandbox=auto` must still wrap.
-		SandboxMode: c.SandboxWrap(vaultName != "none" || kernelDLPActive(c)),
+		// Wrap Bash commands in `secrets-guard sandbox` when a local vault is available to
+		// resolve references (sandbox=auto); `on` forces it, `off` (the default) disables it.
+		SandboxMode: c.SandboxWrap(vaultName != "none"),
 		ShellTools:  splitList(c.ShellTools),
 		// Fail closed when the redaction guard is mandatory but unavailable. Resolved by
 		// guardMode (GUARD_REQUIRED + service reachability), so a machine without the

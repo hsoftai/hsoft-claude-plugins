@@ -124,13 +124,14 @@ If a reference fails with `ref-not-approved`, write it as a `KEY=op://…` line 
 ## Running code that needs the secrets (the key pattern)
 
 Because `.env` files hold *references*, a normal app (`python-dotenv`, `godotenv`,
-node `dotenv`, etc.) would read the literal `op://…` string, not the value. On a
-**kernel-DLP / sandbox host (Windows, Linux)** you do nothing special: just run the
-app's normal command in Bash and the PreToolUse hook renders every reference — in
-the environment **and** in files under the working directory (`.env`, config) —
-into real values that only **that command's process subtree** can read. Other
-processes, and the files on disk, still see the references. The value never lands
-on disk.
+node `dotenv`, etc.) would read the literal `op://…` string, not the value. When the
+operator enables **in-place rendering (`SANDBOX=on`)** you do nothing special: just run
+the app's normal command in Bash and the PreToolUse hook renders every reference — in
+the environment **and** in files under the working directory (`.env`, config) — into
+real values for **that command's process** for the duration of the run, then restores the
+references immediately after. The values live only in process memory; the files keep the
+references afterward. (The redaction guard, which reads your local vault and blocks vault
+values from reaching the model, runs regardless of this setting.)
 
 ```sh
 npm run dev            # the .env's keeper://… / op://… is served only to this subtree
@@ -139,21 +140,21 @@ python app.py
 go run .
 ```
 
-Do **not** wrap these in `secrets-guard run` / `op run` / `ksm exec` yourself — on
-a sandbox host the hook already does the rendering, and it denies those resolving
-subcommands (only the service may touch the vault). Just run the command as the
-project normally would.
+Do **not** wrap these in `secrets-guard run` / `op run` / `ksm exec` yourself — with
+in-place rendering on the hook already does the rendering, and it denies those resolving
+subcommands (only the guard may touch the vault). Just run the command as the project
+normally would.
 
 Write the app to read config from the **environment** (12-factor):
 `os.environ["DB_PASSWORD"]` / `process.env.DB_PASSWORD` / `os.Getenv("DB_PASSWORD")`,
 and put the references in `.env`. The value lives only in the process's memory; the
 `.env` on disk keeps the reference.
 
-**For the developer running it outside Claude Code** (or on a plain in-place macOS
-host), the portable manual command is `secrets-guard run --env-file .env -- <cmd>`
+**For the developer running it outside Claude Code** (or when in-place rendering is off),
+the portable manual command is `secrets-guard run --env-file .env -- <cmd>`
 (equivalently `op run --env-file=.env -- <cmd>` for 1Password or `ksm exec -- <cmd>`
 for Keeper). That is what goes in the README / `start.sh` for humans — you don't run
-it from inside Claude Code on a sandbox host.
+it from inside Claude Code when in-place rendering is on.
 
 ## Found a hardcoded secret? Offer to migrate it to the vault
 
@@ -235,8 +236,8 @@ secret comes from** (vault instead of hardcode) and **how the app is launched**.
 
 The app reads from env; only the launcher resolves references. These are the
 commands the **developer** runs manually / puts in the README or `start.sh` — inside
-Claude Code on a sandbox host you just run the bare command (`node server.js`) and
-the hook renders the references. Pick what fits:
+Claude Code with in-place rendering on you just run the bare command (`node server.js`)
+and the hook renders the references. Pick what fits:
 
 - **npm/Node:** add a script — `"start:secure": "secrets-guard run --env-file .env -- node server.js"`.
 - **Python:** `secrets-guard run --env-file .env -- gunicorn app:app` (or uvicorn,
