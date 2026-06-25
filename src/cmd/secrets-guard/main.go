@@ -71,6 +71,9 @@ func main() {
 		case "install":
 			runInstall()
 			return
+		case "uninstall":
+			runUninstall()
+			return
 		case "read":
 			runRead()
 			return
@@ -603,29 +606,6 @@ func runRead() {
 		}
 		fmt.Println(val)
 	}
-}
-
-// runInstall copies the running binary to a user-level bin directory (default
-// ~/.local/bin) as `secrets-guard`, so it is available on the developer's shell
-// PATH for the manual / start.sh workflow — no administrator privileges needed.
-//
-//	secrets-guard install [--dir DIR]
-func runInstall() {
-	dir := ""
-	args := os.Args[2:]
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--dir" && i+1 < len(args) {
-			dir = args[i+1]
-			i++
-		}
-	}
-	dst, err := selfInstall(dir, false)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "secrets-guard install:", err)
-		os.Exit(1)
-	}
-	fmt.Printf("✓ Installed secrets-guard to %s\n", dst)
-	printPathHint(filepath.Dir(dst))
 }
 
 func copyFile(src, dst string, mode os.FileMode) error {
