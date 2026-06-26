@@ -4,6 +4,18 @@ Esta guía deja el plugin **secrets-guard** instalado, activado y configurado de
 obligatoria en un equipo Windows, y **deshabilita el modo "bypass permissions"** de Claude
 Code. Hay dos caminos: el **automático** (un comando) y el **manual** (paso a paso).
 
+**Resumen por usuario** (una vez desplegado el managed-settings, todo SIN admin):
+
+```powershell
+ksm profile init <ONE-TIME-TOKEN>   # 1. inicializa tu bóveda Keeper
+secrets-guard install               # 2. instala/configura el guard (o se auto-instala al abrir Claude Code)
+secrets-guard doctor                # 3. verifica el estado local
+```
+
+Si `secrets-guard` aún no está en el PATH (equipo recién provisionado, antes del primer
+arranque de Claude Code), ábrelo una vez —el plugin instala el CLI solo— o invócalo por ruta
+completa: `& "$env:LOCALAPPDATA\secrets-guard\bin\secrets-guard.exe" install`.
+
 ## Cómo funciona (modelo local — sin WinFsp, sin servicio, sin admin)
 
 Desde la v0.6.0, secrets-guard se ejecuta **enteramente por usuario: sin servicio del
@@ -152,6 +164,37 @@ secrets-guard uninstall        # quita toda la huella por-usuario de secrets-gua
 ```
 
 Para quitar la política obligatoria machine-wide, ver "Desinstalar / revertir" abajo.
+
+## (Opcional) Telemetría / observabilidad (OpenTelemetry)
+
+Si tu organización envía métricas y logs de Claude Code a un colector OpenTelemetry, agrega
+estas claves **dentro del mismo bloque `"env"`** del managed-settings (reemplaza el endpoint
+y el token por los tuyos):
+
+```json
+"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+"OTEL_LOGS_EXPORTER": "otlp",
+"OTEL_METRICS_EXPORTER": "otlp",
+"OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+"OTEL_EXPORTER_OTLP_ENDPOINT": "https://<tu-endpoint-otel>/otlp",
+"OTEL_EXPORTER_OTLP_HEADERS": "Authorization=Bearer <tu-token>",
+"OTEL_LOG_USER_PROMPTS": "1",
+"OTEL_LOG_TOOL_DETAILS": "1",
+"OTEL_LOG_RAW_API_BODIES": "1",
+"OTEL_RESOURCE_ATTRIBUTES": "client.surface=code,company=<tu-empresa>",
+"OTEL_METRIC_EXPORT_INTERVAL": "10000",
+"OTEL_LOGS_EXPORT_INTERVAL": "2000"
+```
+
+> ⚠️ **Seguridad — léelo antes de activar el logging de contenido.** secrets-guard protege
+> el **contexto del modelo** (lo que llega a Claude), **no** un canal de telemetría aparte.
+> `OTEL_LOG_USER_PROMPTS`, `OTEL_LOG_TOOL_DETAILS` y sobre todo `OTEL_LOG_RAW_API_BODIES`
+> exportan prompts, detalles de herramientas y **cuerpos crudos de la API** a tu colector, y
+> pueden capturar exactamente los secretos que secrets-guard evita filtrar al modelo.
+> Actívalos solo si el colector aplica su propia redacción o confías plenamente en ese
+> destino; si no, déjalos en `"0"` o quítalos. El token va en texto plano en el
+> managed-settings (legible por admin) — trátalo como credencial y no uses un placeholder
+> en producción.
 
 ## Qué queda configurado
 
