@@ -28,22 +28,34 @@ modelo. Si el perfil de la bóveda no está inicializado, el guard cae al **dete
 patrones** integrado (API keys, tokens, claves AWS, llaves privadas…) y nunca bloquea el
 uso normal.
 
-> El único requisito por usuario es la CLI de Keeper `ksm` instalada y un perfil
-> inicializado (`ksm profile init <token>`). Eso no necesita admin. Ya **no** hay nada que
-> instalar a nivel de máquina para el guard; el antiguo servicio `sandbox-dlp` / WinFsp ya
-> no se usa.
+> El único requisito por usuario es la CLI de Keeper (`ksm` **o** el binario standalone
+> `keeper-ksm`) instalada y un perfil inicializado (`ksm profile init <token>`). Eso no
+> necesita admin. Ya **no** hay nada que instalar a nivel de máquina para el guard; el
+> antiguo servicio `sandbox-dlp` / WinFsp ya no se usa.
+
+> **Desde 0.7.1**, secrets-guard detecta el CLI de Keeper bajo cualquiera de sus dos nombres
+> (`ksm` del paquete pip o `keeper-ksm.exe` del release standalone) y encuentra el perfil
+> aunque el `keeper.ini` esté en una carpeta per-usuario (`~/.keeper/keeper.ini` o `~/`):
+> exporta `KSM_INI_FILE` solo e inyecta `--ini-file`, así el perfil carga sin importar el
+> directorio de trabajo. Ya **no** hace falta fijar `KSM_INI_FILE` a mano en la mayoría de
+> los equipos.
 
 `SANDBOX` queda en `off` por defecto (solo redacción); `SANDBOX=on` habilita el renderizado
-de referencias en sitio. `KERNEL_DLP` está **deprecado / es no-op**. `GUARD_REQUIRED=on`
-hace que el guard **falle cerrado** si la bóveda no está disponible; el valor por defecto
-`auto` cae al detector de patrones.
+de referencias en sitio. `KERNEL_DLP` está **deprecado / es no-op**. El valor por defecto
+`GUARD_REQUIRED=auto` cae al detector de patrones cuando la bóveda no está disponible (nunca
+brickea el uso). `GUARD_REQUIRED=on` hace que el guard **falle cerrado**: además de bloquear
+prompts/entradas sin verificar, **bloquea la salida de una herramienta cuando hay una bóveda
+configurada pero sus valores no se pudieron cargar** (no se puede garantizar que la salida no
+contenga un secreto, así que se retiene "si no se puede redactar, se bloquea la lectura").
 
 ## Requisitos previos
 
 - **Claude Code** instalado.
-- **Keeper Secrets Manager CLI (`ksm`)** instalada **por cada usuario** y con un perfil
-  inicializado (sin admin). Sin esto el plugin se activa, pero cae al detector de patrones
-  en vez de al guard de bóveda completa.
+- **Keeper Secrets Manager CLI** instalada **por cada usuario** y con un perfil inicializado
+  (sin admin). Vale cualquiera de sus dos nombres: `ksm` (paquete pip) o `keeper-ksm.exe`
+  (release standalone); secrets-guard detecta ambos. Sin esto el plugin se activa, pero cae
+  al detector de patrones en vez de al guard de bóveda completa. (Alternativa para flota:
+  embeber `KSM_CONFIG` en el managed-settings, ver paso 3.)
 - Permisos de **administrador** **solo** para escribir el `managed-settings.json` machine-
   wide (la política obligatoria). El guard en sí **no** necesita admin.
 
@@ -120,23 +132,62 @@ Pega este contenido y **guárdalo como UTF-8 (sin BOM)**:
     "CLAUDE_PLUGIN_OPTION_SANDBOX": "off",
     "CLAUDE_PLUGIN_OPTION_PRELOAD_SECRETS": "auto",
     "CLAUDE_PLUGIN_OPTION_GUARD_REQUIRED": "auto",
-    "CLAUDE_PLUGIN_OPTION_AUDIT_LOG_PATH": "C:\\ProgramData\\secrets-guard\\audit.log"
+    "CLAUDE_PLUGIN_OPTION_AUDIT_LOG_PATH": "C:\\ProgramData\\secrets-guard\\audit.log",
+    "KSM_CONFIG": "<base64-keeper-config>"
   }
 }
 ```
 
-> Las `\\` dobles en la ruta del audit log son obligatorias (escape de JSON).
+> Las `\\` dobles en cualquier ruta (audit log, `KSM_INI_FILE`) son obligatorias (escape de JSON).
+
+> 🚨 **`PRELOAD_SECRETS` debe ser `auto` (o `on`) para censurar lecturas de archivos.** Este
+> es el ajuste que decide si secrets-guard carga **toda** la bóveda en caché y compara cada
+> valor contra prompts y **salidas de herramientas**. Si lo pones en **`off`**, el guard solo
+> redacta valores que se resolvieron **durante esa sesión**: un `Read` de un archivo (o
+> cualquier salida) que contenga un secreto de la bóveda **NO se censura ni se bloquea**,
+> aunque `list_secrets` funcione. Si ves que el modelo lista los secretos pero muestra un
+> valor sin censurar al leer un archivo, **revisa que `CLAUDE_PLUGIN_OPTION_PRELOAD_SECRETS`
+> no esté en `off`**. Verifícalo con `secrets-guard doctor` (avisa si la precarga está
+> apagada).
+
+#### Credencial de la bóveda — elige UNA estrategia
+
+`KSM_CONFIG` es la forma **recomendada para flota**: una sola credencial base64 machine-wide
+que funciona para **todos** los usuarios sin depender de un perfil `ksm` local ni de la
+ubicación del `keeper.ini`. Obtenla con `ksm profile export --file-format json` y pégala como
+valor de `KSM_CONFIG`. Si la usas, `KSM_INI_FILE` se ignora (tiene precedencia y no necesita
+INI).
+
+> 🚨 **Rellena o elimina `KSM_CONFIG` — no dejes el placeholder.** Si guardas el JSON con el
+> literal `<base64-keeper-config>` sin reemplazar, la bóveda **deja de funcionar**: ksm
+> intentará usar esa config inválida y, además, secrets-guard omite la autodetección del
+> `keeper.ini` local cuando `KSM_CONFIG` está presente. Si **no** vas a embeber credencial,
+> **borra la línea `KSM_CONFIG` por completo** y cada usuario usa su perfil `ksm`/`keeper-ksm`
+> local (autodetectado, ver más abajo).
+
+> ⚠️ **`KSM_INI_FILE` y la NO-expansión de variables.** Los valores de `env` del
+> managed-settings se aplican **literales**: Claude Code **no** expande `%USERPROFILE%` ni
+> `${HOME}`. Por eso **no** pongas `"KSM_INI_FILE": "%USERPROFILE%\\.keeper\\keeper.ini"` en el
+> archivo machine-wide (quedaría literal y no resolvería). Opciones correctas:
+> - **No lo pongas** (recomendado): 0.7.1 autodetecta `~/.keeper/keeper.ini` por usuario.
+> - **Embebe `KSM_CONFIG`** (arriba): no depende de ningún `keeper.ini`.
+> - **Per-usuario** (solo si el `keeper.ini` está en una ruta no estándar): que el propio
+>   usuario lo fije con
+>   `[Environment]::SetEnvironmentVariable("KSM_INI_FILE", "$env:USERPROFILE\.keeper\keeper.ini", "User")`
+>   y reinicie Claude Code. Ahí sí se expande, porque lo resuelve el shell al arrancar.
 
 ### 3. (Opcional) Embeber la credencial de Keeper
 
-Si no quieres depender del perfil `ksm` local de cada usuario, agrega dentro de `"env"`:
+El bloque de arriba ya incluye la línea `KSM_CONFIG`. Rellénala con el base64 de tu perfil
+para que la bóveda funcione machine-wide sin perfil `ksm` local por usuario:
 
 ```json
 "KSM_CONFIG": "<base64-keeper-config>"
 ```
 
 Para obtener el base64: `ksm profile export --file-format json` (o el que ya tengas).
-Si lo omites, el guard usa directamente el perfil `ksm` local del usuario.
+Si prefieres que cada usuario use su propio perfil `ksm` local, **elimina la línea
+`KSM_CONFIG`** del managed-settings.
 
 ### 4. Instalar la CLI y verificar
 
@@ -206,10 +257,13 @@ y el token por los tuyos):
 | `TOOL_INPUT_POLICY` | `deny` | Niega entradas de herramienta con secretos en texto plano |
 | `TOOL_OUTPUT_MODE` | `redact` | Redacta secretos en la salida de herramientas |
 | `SANDBOX` | `off` | Solo redacción (sin renderizado de referencias). `on` = renderizado en sitio |
-| `PRELOAD_SECRETS` | `auto` | Guard proactivo: carga la bóveda local en caché en memoria y bloquea/redacta cualquier valor en prompts y herramientas |
-| `GUARD_REQUIRED` | `auto` | `auto` cae al detector si la bóveda no está disponible; `on` falla cerrado; `off` nunca falla cerrado |
+| `PRELOAD_SECRETS` | `auto` | Guard proactivo: carga la bóveda local en caché en memoria y redacta/bloquea cualquier valor en prompts y salidas de herramientas (incl. lecturas de archivos). **`off` lo desactiva**: solo se redactan valores resueltos en la sesión, y un `Read` de un secreto no referenciado queda **sin censurar** |
+| `GUARD_REQUIRED` | `auto` | `auto` cae al detector si la bóveda no está disponible (no brickea). `on` falla cerrado: bloquea prompts/entradas sin verificar **y** la salida de una herramienta si la bóveda está configurada pero no cargó. `off` nunca falla cerrado |
+| `KSM_CONFIG` | base64 (o ausente) | Credencial de Keeper machine-wide para toda la flota; si se omite, cada usuario usa su perfil `ksm`/`keeper-ksm` local |
 
 > `KERNEL_DLP` está **deprecado / no-op** y ya no se incluye en la configuración.
+> `KSM_INI_FILE` **no** se pone en el managed-settings (los valores son literales, sin
+> expansión de `%USERPROFILE%`); 0.7.1 autodetecta `~/.keeper/keeper.ini` por usuario.
 
 ## Desinstalar / revertir
 

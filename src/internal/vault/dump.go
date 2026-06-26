@@ -100,7 +100,13 @@ func keeperAllValues(r Runner) ([]string, error) {
 		if it.UID == "" {
 			continue
 		}
-		raw, err := r.Run(bin, "secret", "get", "--uid", it.UID, "--json")
+		// --unmask is REQUIRED: ksm masks password-like fields (e.g. a login record's
+		// `password`) by default, returning "******" instead of the real value. The
+		// redaction guard must hold the REAL value to be able to redact it; without --unmask
+		// a login record's password is cached as the mask and therefore never censored when
+		// it later appears in a file/tool output (while non-masked fields, like text/custom
+		// secrets, still are). This is the "login-type secrets are not censored" bug.
+		raw, err := r.Run(bin, "secret", "get", "--uid", it.UID, "--json", "--unmask")
 		if err != nil {
 			continue // skip a record we cannot read; never fail the whole preload
 		}

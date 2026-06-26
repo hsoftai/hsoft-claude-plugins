@@ -69,6 +69,16 @@ func runDoctor() {
 	fmt.Printf("  options:        sandbox=%s preload_secrets=%s guard_required=%s\n",
 		cfg.Sandbox, cfg.PreloadSecrets, cfg.GuardRequired)
 	fmt.Println("  model:          local — ksm/op profile + in-memory cache (no service, no WinFsp, no admin)")
+	// The single most common misconfiguration: a reachable vault but preload_secrets=off, so
+	// the full-vault cache is never populated and a file/tool read of a secret that was not
+	// resolved THIS session is neither redacted nor blocked. Call it out loudly.
+	if !cfg.PreloadEnabled() && err == nil {
+		fmt.Println("  ⚠ WARNING:      preload_secrets=off — the full-vault redaction guard is DISABLED.")
+		fmt.Println("                  A Read/tool output containing a vault secret that was NOT resolved")
+		fmt.Println("                  this session will NOT be redacted or blocked. Set preload_secrets=auto")
+		fmt.Println("                  (managed-settings: CLAUDE_PLUGIN_OPTION_PRELOAD_SECRETS=auto) to scan")
+		fmt.Println("                  every value in the vault against every prompt and tool output.")
+	}
 	if err != nil && cfg.GuardRequired == "on" {
 		fmt.Println("  => guard_required=on and the vault is NOT ready: prompts/tools will be BLOCKED. Fix the vault or set guard_required=auto.")
 	} else {

@@ -19,12 +19,13 @@ func TestAllSecretValues_Keeper(t *testing.T) {
 		present: map[string]bool{"ksm": true},
 		outputs: map[string]string{
 			"ksm secret list --json": `[{"uid":"UID1"},{"uid":"UID2"}]`,
-			"ksm secret get --uid UID1 --json": `{"uid":"UID1","title":"prod-db","type":"login",
+			// The preload passes --unmask so password-like fields return real values.
+			"ksm secret get --uid UID1 --json --unmask": `{"uid":"UID1","title":"prod-db","type":"login",
 				"fields":[{"type":"login","value":["dbadmin"]},{"type":"password","value":["S3cretPassw0rd"]}],
 				"custom":[{"type":"text","label":"token","value":["tok_abcdef123456"]},{"type":"pin","value":["123"]}],
 				"notes":"a memorable note"}`,
 			// UID2 repeats a value (dedup) and adds a fresh one.
-			"ksm secret get --uid UID2 --json": `{"uid":"UID2","title":"x",
+			"ksm secret get --uid UID2 --json --unmask": `{"uid":"UID2","title":"x",
 				"fields":[{"type":"password","value":["S3cretPassw0rd"]},{"type":"password","value":["AnotherPass99"]}]}`,
 		},
 	}
@@ -60,6 +61,11 @@ func TestAllSecretValues_Keeper(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("expected the repeated value once after dedup, got %d", n)
+	}
+	// The get call MUST request --unmask; otherwise ksm returns masked password fields
+	// ("******") and a login record's real password would never enter the redaction guard.
+	if !contains(m.calls, "ksm secret get --uid UID1 --json --unmask") {
+		t.Errorf("preload must call `ksm secret get ... --unmask`, calls were %v", m.calls)
 	}
 }
 

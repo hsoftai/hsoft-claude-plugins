@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-06-27
+
+### Fixed
+- **Login-type secrets are now redacted.** The full-vault preload runs `ksm secret get`,
+  which **masks** password-like fields by default (returns `******` instead of the value).
+  The redaction guard was therefore caching the mask, not the real password, so a login
+  record's password was never censored when it later appeared in a file/tool output — while
+  non-masked fields (text/custom secrets) still were. The preload now passes `--unmask`, so
+  every real value enters the guard. (Usernames/emails/urls remain excluded and visible.)
+
+### Added
+- **`secrets-guard doctor` now warns when `preload_secrets=off` but the vault is reachable.**
+  In that state the full-vault redaction guard is disabled, so a file/tool read of a vault
+  secret that was not resolved this session is neither redacted nor blocked. The diagnostic
+  calls it out explicitly and points to `CLAUDE_PLUGIN_OPTION_PRELOAD_SECRETS=auto`.
+
 ## [0.7.1] - 2026-06-26
 
 ### Fixed
