@@ -139,6 +139,12 @@ func runHook() {
 		if _, err := selfInstall("", true); err != nil {
 			fmt.Fprintln(os.Stderr, "secrets-guard: self-install:", err)
 		}
+		// Self-heal: silently remove any leftover components from the removed WinFsp/service
+		// model so a machine transitioning to the local model needs no manual cleanup. Cheap
+		// when clean (a few stat checks); runs the removal only when something is detected.
+		if len(staleComponents()) > 0 {
+			removeStale()
+		}
 		// Crash recovery: if a previous sandbox command was hard-killed mid-render on
 		// macOS/Windows (in-place file rendering), restore the original references now.
 		recoverSandboxJournals()

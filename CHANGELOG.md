@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-06-26
+
+### Changed
+- SessionStart now self-heals: besides installing the CLI on PATH and preloading the vault
+  cache, it silently removes any leftover components from the old WinFsp/service model
+  (detected cheaply by stat, removed only when present). So changing a managed-settings
+  option (e.g. `PRELOAD_SECRETS`/`SANDBOX` off→on) or transitioning a dirty machine is
+  picked up automatically on the next session with no manual `install` — plugin options are
+  read fresh every hook invocation. The only per-user prerequisite that is not auto-
+  provisioned is the vault profile (`ksm profile init`); without it the guard degrades to
+  the pattern detector.
+
 ## [0.6.1] - 2026-06-26
 
 ### Fixed
