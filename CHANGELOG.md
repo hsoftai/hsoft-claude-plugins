@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-06-26
+
+### Fixed
+- The Keeper CLI (`ksm`, shipped as `ksm.bat`) is now found even when the host spawns the
+  hook with a thin/empty `PATHEXT` — observed with the VSCode Claude extension host, where
+  the terminal CLI detected the vault but the extension reported it as `none`. The PATH
+  augmentation now also normalizes `PATHEXT` to include `.BAT`/`.CMD` so `exec.LookPath`
+  resolves a `.bat`/`.cmd` CLI regardless of the inherited environment.
+
 ## [0.6.3] - 2026-06-26
 
 ### Fixed

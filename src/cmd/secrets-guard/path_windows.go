@@ -21,6 +21,11 @@ var vaultPathOnce sync.Once
 // `op` already resolves, so it is cheap on the common path.
 func augmentVaultPath() {
 	vaultPathOnce.Do(func() {
+		// The Keeper CLI ships `ksm` as `ksm.bat`. A host that spawns the hook with a thin
+		// PATHEXT (observed with the VSCode extension host) makes LookPath("ksm") fail even
+		// when its directory is on PATH, because .BAT is not in the search extensions. Ensure
+		// the standard executable extensions are present so `ksm.bat`/`op.cmd` resolve.
+		ensurePathExt()
 		if _, err := exec.LookPath("ksm"); err == nil {
 			return
 		}
@@ -53,4 +58,26 @@ func augmentVaultPath() {
 		sep := string(os.PathListSeparator)
 		os.Setenv("PATH", strings.Join(extra, sep)+sep+os.Getenv("PATH"))
 	})
+}
+
+// ensurePathExt guarantees the standard Windows executable extensions are searchable, so a
+// CLI shipped as `.bat`/`.cmd` (Keeper's `ksm.bat`) resolves through exec.LookPath even when
+// the process inherited an empty or reduced PATHEXT.
+func ensurePathExt() {
+	const std = ".COM;.EXE;.BAT;.CMD;.VBS;.JS;.WS;.MSC"
+	cur := os.Getenv("PATHEXT")
+	if cur == "" {
+		os.Setenv("PATHEXT", std)
+		return
+	}
+	up := strings.ToUpper(cur)
+	add := []string{}
+	for _, w := range []string{".COM", ".EXE", ".BAT", ".CMD"} {
+		if !strings.Contains(up, w) {
+			add = append(add, w)
+		}
+	}
+	if len(add) > 0 {
+		os.Setenv("PATHEXT", cur+";"+strings.Join(add, ";"))
+	}
 }
