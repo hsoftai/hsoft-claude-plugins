@@ -36,6 +36,9 @@ import (
 var version = "dev"
 
 func main() {
+	// Make the vault CLI (ksm/op) resolvable even under a stale launch PATH (Windows),
+	// so the guard finds the user's installed Keeper/1Password CLI. No-op elsewhere.
+	augmentVaultPath()
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "version", "--version", "-v":

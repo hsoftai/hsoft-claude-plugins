@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-06-26
+
+### Fixed
+- The vault CLI is now found even under a stale launch PATH. secrets-guard detects the vault
+  with a PATH lookup; if the Claude Code process inherited a PATH from before the Keeper/1Password
+  CLI was installed (common on Windows for a long-running GUI app), the CLI was not found and the
+  vault reported `none`, degrading to the detector even with a configured profile. The client now
+  augments its PATH from the machine + user registry `Path` (env vars expanded) when the CLI is
+  not already resolvable — restoring the same behavior the removed service used to have.
+
 ## [0.6.2] - 2026-06-26
 
 ### Changed
