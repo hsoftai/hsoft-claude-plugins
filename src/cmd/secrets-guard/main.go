@@ -39,6 +39,9 @@ func main() {
 	// Make the vault CLI (ksm/op) resolvable even under a stale launch PATH (Windows),
 	// so the guard finds the user's installed Keeper/1Password CLI. No-op elsewhere.
 	augmentVaultPath()
+	// Point ksm at the user's INI config when it lives in a standard per-user location, so
+	// it resolves regardless of the working directory.
+	ensureKeeperConfig()
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "version", "--version", "-v":
@@ -174,19 +177,26 @@ func runHook() {
 	if err != nil {
 		self = ""
 	}
-	h := hook.NewHandler(toHookConfig(cfg, resolver.ProviderName(), cfg.GuardRequired == "on"), eng, red, resolver, valueGuard(), self)
-	if cfg.IsCowork {
-		h.SetCoworkAnchor(coworkAnchor{})
-	}
 	// CONSISTENCY: before scanning a prompt or tool I/O, guarantee the full vault is loaded
 	// into this session's cache. The SessionStart preload is async and can lose the race (or
 	// the daemon may have expired), which made redaction intermittent. This loads the vault
 	// synchronously on the first scanning event if it isn't primed yet (then it's cached for
 	// the rest of the session), so every Read/tool output is always scanned against every
 	// value.
+	guardReady := true
 	switch in.HookEventName {
 	case "UserPromptSubmit", "PreToolUse", "PostToolUse":
 		ensureCachePrimed(cfg, in.SessionID)
+		// If a vault IS configured (provider resolved + preload on) but its values could not
+		// be loaded into the cache, the guard cannot verify a tool output is secret-free.
+		// Mark it not-ready so PostToolUse blocks instead of leaking — "no redact -> block".
+		if cfg.PreloadEnabled() && resolver.ProviderName() != "none" {
+			guardReady = cache.New().Primed(in.SessionID)
+		}
+	}
+	h := hook.NewHandler(toHookConfig(cfg, resolver.ProviderName(), cfg.GuardRequired == "on", guardReady), eng, red, resolver, valueGuard(), self)
+	if cfg.IsCowork {
+		h.SetCoworkAnchor(coworkAnchor{})
 	}
 	out := h.Handle(in)
 
@@ -729,7 +739,7 @@ func readInput(r io.Reader) (hook.Input, error) {
 	return in, err
 }
 
-func toHookConfig(c config.Config, vaultName string, failClosed bool) hook.Config {
+func toHookConfig(c config.Config, vaultName string, failClosed, guardReady bool) hook.Config {
 	return hook.Config{
 		BlockOnPromptSecret: c.BlockOnPromptSecret,
 		ToolInputPolicy:     c.ToolInputPolicy,
@@ -747,6 +757,10 @@ func toHookConfig(c config.Config, vaultName string, failClosed bool) hook.Confi
 		// guardMode (GUARD_REQUIRED + service reachability), so a machine without the
 		// service degrades to the detector instead of blocking every prompt and tool.
 		RequireGuard: failClosed,
+		// GuardReady reflects whether the vault values are actually loaded into the cache.
+		// False when a vault is configured but its values failed to load: PostToolUse then
+		// blocks rather than emit an unverifiable "clean" output ("no redact -> block read").
+		GuardReady: guardReady,
 	}
 }
 

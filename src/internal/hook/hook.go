@@ -105,6 +105,13 @@ type Config struct {
 	// local fallback (Windows + redaction guard on), so a crashed service can never
 	// silently let a secret reach the model.
 	RequireGuard bool
+	// GuardReady is false when a vault IS configured but its values could not be loaded into
+	// the cache (e.g. the ksm/op profile failed to load). In that state the guard cannot
+	// verify a tool output is free of vault secrets, so PostToolUse BLOCKS the result rather
+	// than risk showing one in plain text — "if a redact is not possible, block the read."
+	// It is true when the vault is loaded (redaction works) or no vault is configured at all
+	// (degrade to the pattern detector, do not block usage).
+	GuardReady bool
 }
 
 // CoworkAnchor mints, per command, the trust anchor for a fetch that will run in
@@ -552,6 +559,24 @@ func (h *Handler) handlePostTool(in Input) Output {
 	case guardUnavailable:
 		h.Last = Decision{Event: "PostToolUse", Action: "block"}
 		return guardUnavailableBlock("PostToolUse")
+	}
+
+	// The vault scan said "clean", but if the vault is configured yet its values could not be
+	// loaded (GuardReady false), that "clean" is unverifiable — we could not have matched a
+	// vault secret. Per the "no redact -> block read" policy we BLOCK rather than risk showing
+	// a secret in plain text. This is FAIL-CLOSED and therefore gated on RequireGuard
+	// (guard_required=on): with the default guard_required=auto we degrade to the detector
+	// instead of blocking every tool output, so a machine whose vault is momentarily not
+	// loaded is not bricked. Only applies when a vault is actually configured.
+	if h.cfg.RequireGuard && !h.cfg.GuardReady && h.cfg.VaultName != "" && h.cfg.VaultName != "none" {
+		h.Last = Decision{Event: "PostToolUse", Action: "block"}
+		return Output{
+			Decision: "block",
+			Reason:   "secrets-guard: vault not loaded — cannot verify output is secret-free",
+			SystemMessage: "🛑 secrets-guard retuvo la salida: tu bóveda está configurada pero no se " +
+				"pudieron cargar sus valores, así que no se puede garantizar que la salida no contenga un " +
+				"secreto. Corrige tu perfil (revisa `secrets-guard doctor`) y reintenta.",
+		}
 	}
 
 	// Detector-based scanning of arbitrary (not vault-known) secrets is the tunable part:

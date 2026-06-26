@@ -6,6 +6,7 @@ package vault
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -37,6 +38,16 @@ func (execRunner) Look(name string) bool {
 }
 
 func (execRunner) Run(name string, args ...string) (string, error) {
+	// Point the Keeper CLI at the user's INI config (KSM_INI_FILE) via the global
+	// --ini-file flag. ksm otherwise only looks for keeper.ini in the CURRENT directory, so
+	// a profile initialized to ~/.keeper/keeper.ini is invisible when ksm runs from a
+	// project dir ("The Keeper SDK client has not been loaded. The INI config might not be
+	// set."). KSM_CONFIG (base64) takes precedence and needs no INI, so skip then.
+	if isKeeperBin(name) && os.Getenv("KSM_CONFIG") == "" {
+		if ini := os.Getenv("KSM_INI_FILE"); ini != "" {
+			args = append([]string{"--ini-file", ini}, args...)
+		}
+	}
 	out, err := vaultCommand(name, args).Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -55,7 +66,7 @@ func NewRunner() Runner { return execRunner{} }
 // ONCE into its own protected store, then removes the local profile so that only the
 // service — never a bare `ksm` invocation by any other process — can resolve references.
 func ExportKeeperConfig() (string, error) {
-	out, err := execRunner{}.Run("ksm", "profile", "export", "--file-format", "json")
+	out, err := execRunner{}.Run(keeperBin(execRunner{}), "profile", "export", "--file-format", "json")
 	if err != nil {
 		return "", err
 	}
@@ -66,7 +77,7 @@ func ExportKeeperConfig() (string, error) {
 // storage (the Windows Credential Manager / keyring), so a bare `ksm` can no longer
 // resolve. Only a holder of KSM_CONFIG (the service, from its protected store) can.
 func DeleteKeeperProfile() error {
-	_, err := execRunner{}.Run("ksm", "profile", "delete", "_default")
+	_, err := execRunner{}.Run(keeperBin(execRunner{}), "profile", "delete", "_default")
 	return err
 }
 
@@ -74,7 +85,7 @@ func DeleteKeeperProfile() error {
 // metadata (titles/UIDs, never values). The service uses it to gate the destructive
 // profile delete, so removing the local profile can never strand it without a credential.
 func VerifyKeeperConfig() error {
-	_, err := execRunner{}.Run("ksm", "secret", "list")
+	_, err := execRunner{}.Run(keeperBin(execRunner{}), "secret", "list")
 	return err
 }
 

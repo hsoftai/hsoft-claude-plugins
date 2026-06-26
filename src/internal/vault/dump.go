@@ -84,7 +84,8 @@ func (c *collector) walk(n any) {
 // keeperAllValues lists every record shared to the KSM application and collects the
 // values of its fields/custom fields/notes (one `ksm secret get` per record).
 func keeperAllValues(r Runner) ([]string, error) {
-	out, err := r.Run("ksm", "secret", "list", "--json")
+	bin := keeperBin(r)
+	out, err := r.Run(bin, "secret", "list", "--json")
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +100,7 @@ func keeperAllValues(r Runner) ([]string, error) {
 		if it.UID == "" {
 			continue
 		}
-		raw, err := r.Run("ksm", "secret", "get", "--uid", it.UID, "--json")
+		raw, err := r.Run(bin, "secret", "get", "--uid", it.UID, "--json")
 		if err != nil {
 			continue // skip a record we cannot read; never fail the whole preload
 		}

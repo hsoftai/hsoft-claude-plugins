@@ -53,7 +53,7 @@ func runDoctor() {
 	fmt.Println("secrets-guard doctor —", version)
 	fmt.Println("  os:            ", runtime.GOOS)
 	fmt.Println("  user:          ", os.Getenv("USERNAME"))
-	if p, err := exec.LookPath("ksm"); err == nil {
+	if p, ok := vault.LookKeeper(); ok {
 		fmt.Println("  ksm on PATH:    yes (", p, ")")
 	} else if p, err := exec.LookPath("op"); err == nil {
 		fmt.Println("  op on PATH:     yes (", p, ")")
@@ -82,9 +82,9 @@ func runDoctor() {
 func runDLPInstall(cfg config.Config) {
 	fmt.Println("secrets-guard: setting up the local redaction guard (per-user, no admin, no service)...")
 
-	_, ksmErr := exec.LookPath("ksm")
+	_, ksmOK := vault.LookKeeper()
 	_, opErr := exec.LookPath("op")
-	if ksmErr != nil && opErr != nil {
+	if !ksmOK && opErr != nil {
 		fmt.Fprintln(os.Stderr, "secrets-guard dlp-install: FAILED — no vault CLI (ksm/op) found on PATH.")
 		fmt.Fprintln(os.Stderr, "  install Keeper:  winget install KeeperSecurity.KeeperSecretsManager")
 		fmt.Fprintln(os.Stderr, "  then initialize:  ksm profile init <one-time-token>")

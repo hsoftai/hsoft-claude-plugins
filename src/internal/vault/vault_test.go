@@ -44,6 +44,30 @@ func TestKeeper_Resolve(t *testing.T) {
 	}
 }
 
+// TestKeeper_Resolve_StandaloneBinary covers the host where ONLY the standalone
+// `keeper-ksm.exe` is on PATH (no pip `ksm` console script). The provider must still be
+// available and resolve via that binary — otherwise it reports "vault: none" despite a
+// working CLI (the pedro.valencia diagnosis).
+func TestKeeper_Resolve_StandaloneBinary(t *testing.T) {
+	m := &mockRunner{
+		present: map[string]bool{"keeper-ksm": true},
+		outputs: map[string]string{
+			"keeper-ksm secret notation keeper://UID1/field/password": "S3CRET-VALUE\n",
+		},
+	}
+	p := newKeeper(m)
+	if !p.Available() {
+		t.Fatal("keeper must be Available when only keeper-ksm is on PATH")
+	}
+	got, err := p.Resolve("keeper://UID1/field/password", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "S3CRET-VALUE" {
+		t.Fatalf("got %q, want S3CRET-VALUE via keeper-ksm", got)
+	}
+}
+
 func TestOnePassword_Resolve(t *testing.T) {
 	m := &mockRunner{
 		present: map[string]bool{"op": true},

@@ -26,11 +26,13 @@ func augmentVaultPath() {
 		// when its directory is on PATH, because .BAT is not in the search extensions. Ensure
 		// the standard executable extensions are present so `ksm.bat`/`op.cmd` resolve.
 		ensurePathExt()
-		if _, err := exec.LookPath("ksm"); err == nil {
-			return
-		}
-		if _, err := exec.LookPath("op"); err == nil {
-			return
+		// The Keeper CLI ships under two names: the pip console script `ksm` and the
+		// standalone release binary `keeper-ksm.exe`. Any of these (or 1Password's `op`)
+		// resolving means the PATH is already good.
+		for _, bin := range []string{"ksm", "keeper-ksm", "op"} {
+			if _, err := exec.LookPath(bin); err == nil {
+				return
+			}
 		}
 		var extra []string
 		for _, e := range []struct {

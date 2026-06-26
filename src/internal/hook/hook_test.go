@@ -639,6 +639,68 @@ func TestPostToolUse_PassthroughCleanOutput(t *testing.T) {
 	}
 }
 
+// TestPostToolUse_BlocksWhenVaultNotLoaded covers the fail-closed "no redact -> block read"
+// policy: with guard_required=on (RequireGuard), a vault IS configured (VaultName set) but its
+// values never loaded (GuardReady false), so the guard cannot prove the output is secret-free.
+// Even a seemingly clean output must be blocked rather than risk leaking a vault secret.
+func TestPostToolUse_BlocksWhenVaultNotLoaded(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.RequireGuard = true
+	cfg.VaultName = "keeper"
+	cfg.GuardReady = false
+	// amnesiacCache is REACHABLE (ok=true) but holds no values, like a live daemon whose
+	// session was never primed — the exact state GuardReady=false represents.
+	eng := detect.New()
+	h := NewHandler(cfg, eng, redact.New(eng), fakeResolver{value: "RESOLVED_SECRET"}, amnesiacCache{}, "/opt/sg/bin/secrets-guard")
+	out := h.Handle(Input{
+		HookEventName: "PostToolUse",
+		ToolName:      "Read",
+		ToolResponse:  json.RawMessage(`"looks clean but the vault is not loaded"`),
+	})
+	if out.Decision != "block" {
+		t.Fatalf("a configured-but-unloaded vault must block the output under guard_required=on, got %+v", out)
+	}
+}
+
+// TestPostToolUse_DegradesWhenVaultNotLoaded is the default (guard_required=auto): the vault
+// is configured but not loaded, yet RequireGuard is off, so the guard degrades to the
+// detector instead of blocking every output — the machine is not bricked.
+func TestPostToolUse_DegradesWhenVaultNotLoaded(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.RequireGuard = false
+	cfg.VaultName = "keeper"
+	cfg.GuardReady = false
+	eng := detect.New()
+	h := NewHandler(cfg, eng, redact.New(eng), fakeResolver{value: "RESOLVED_SECRET"}, amnesiacCache{}, "/opt/sg/bin/secrets-guard")
+	out := h.Handle(Input{
+		HookEventName: "PostToolUse",
+		ToolName:      "Read",
+		ToolResponse:  json.RawMessage(`"looks clean and the guard is not mandatory"`),
+	})
+	if out.Decision == "block" {
+		t.Fatalf("with guard_required=auto an unloaded vault must NOT block (degrade), got %+v", out)
+	}
+}
+
+// TestPostToolUse_PassesWhenVaultLoaded is the counterpart: with the vault loaded
+// (GuardReady true), a clean output passes through normally even under guard_required=on.
+func TestPostToolUse_PassesWhenVaultLoaded(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.RequireGuard = true
+	cfg.VaultName = "keeper"
+	cfg.GuardReady = true
+	eng := detect.New()
+	h := NewHandler(cfg, eng, redact.New(eng), fakeResolver{value: "RESOLVED_SECRET"}, amnesiacCache{}, "/opt/sg/bin/secrets-guard")
+	out := h.Handle(Input{
+		HookEventName: "PostToolUse",
+		ToolName:      "Read",
+		ToolResponse:  json.RawMessage(`"all good here"`),
+	})
+	if out.Decision == "block" {
+		t.Fatalf("a clean output with the vault loaded must pass through, got %+v", out)
+	}
+}
+
 func TestPostToolUse_BlockMode(t *testing.T) {
 	cfg := defaultCfg()
 	cfg.ToolOutputMode = "block"

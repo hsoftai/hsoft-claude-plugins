@@ -6,6 +6,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-06-26
+
+### Fixed
+- **Detect the Keeper CLI when it is installed as `keeper-ksm.exe`.** The standalone Keeper
+  release ships the binary as `keeper-ksm` (only the pip console script is named `ksm`), so a
+  host with just `keeper-ksm.exe` on PATH reported "vault: none" despite a working CLI.
+  secrets-guard now resolves either name (`ksm` or `keeper-ksm`) everywhere it invokes Keeper
+  — availability, reference resolution, the full-vault preload, and the PATH/diagnostic
+  checks — so the vault is found regardless of which package provided the CLI.
+- **Find the Keeper config even when it lives in a per-user folder.** ksm only looks for
+  `keeper.ini` in the CURRENT directory by default, so a profile initialized to
+  `~/.keeper/keeper.ini` (or via `ksm profile init --ini-file ...`) was invisible when ksm
+  ran from a project directory — the SDK reported "The Keeper SDK client has not been
+  loaded. The INI config might not be set," the vault stayed unreachable, the value cache
+  stayed empty, and file reads were therefore NOT redacted. secrets-guard now detects a
+  `keeper.ini` in `~/.keeper/` or `~/` (sets `KSM_INI_FILE`) and passes ksm the global
+  `--ini-file` flag, so the user's profile loads regardless of the working directory.
+  An explicit `KSM_CONFIG` (base64) or `KSM_INI_FILE` is respected as-is.
+
+### Added
+- **`guard_required=on` now blocks a tool output when the vault is configured but its values
+  could not be loaded** ("if a redact is not possible, block the read"). When a vault is
+  selected yet its value cache could not be primed (e.g. a broken ksm/op profile), the guard
+  cannot prove a tool result is free of vault secrets, so under the strict fail-closed policy
+  it blocks the result instead of risking a plaintext leak. The default `guard_required=auto`
+  is unchanged: it degrades to the built-in detector instead of blocking, so a machine whose
+  vault is momentarily unavailable is never bricked.
+
 ## [0.7.0] - 2026-06-26
 
 ### Changed
