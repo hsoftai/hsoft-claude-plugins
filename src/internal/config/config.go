@@ -42,38 +42,33 @@ type Config struct {
 	Sandbox      string // auto | on | off
 	SandboxGlobs string // comma-separated globs overriding the default scan set
 
-	// KernelDLP controls WINDOWS file rendering via the sandbox-dlp service (a user-mode
-	// provider over WinFsp, which propagates the requesting process id): the rendered
-	// value is served only to the command's process subtree and never touches disk.
-	// `auto` (default) uses the service when present and falls back to the in-place
-	// renderer otherwise; `require` is provider-only and fails closed (skips file
-	// rendering — never writes a value to disk) when the service is absent; `off` keeps
-	// the in-place renderer. Ignored on Linux (mount-namespace bind-mount already
-	// isolates), in Cowork, and on macOS — where SIP prevents any robust kext-free
-	// per-process substitution, so macOS keeps the in-place renderer + recovery journal.
-	KernelDLP        string // auto | require | off (Windows only)
-	DLPInstallSource string // override URL/base for the sandbox-dlp installer (air-gapped mirrors)
+	// KernelDLP is DEPRECATED / no-op. The old WINDOWS sandbox-dlp / WinFsp service was
+	// removed: secrets-guard runs entirely per-user (local ksm/op profile + in-memory
+	// cache) and the sandbox, when enabled, uses the in-place renderer with a recovery
+	// journal on every OS. Kept only for backward compatibility and ignored.
+	KernelDLP        string // deprecated / no-op
+	DLPInstallSource string // deprecated / no-op (no installer is downloaded any more)
 
 	// PreloadSecrets controls the proactive full-vault redaction guard: at
 	// SessionStart secrets-guard loads EVERY value the vault exposes to its
 	// credential into the per-session in-memory cache (never disk), so any later
 	// prompt, tool input, tool output, or file read containing one of those values
 	// (in any encoding) is redacted or blocked before it can reach the model — even
-	// if the value was never referenced this session. On Windows (kernel-DLP) the
-	// values come from the sandbox-dlp service, the only credential holder. `auto`
-	// (default) and `on` enable it; `off` disables it (only session-resolved values
-	// are guarded). It is the proactive complement to the always-on backstop that
-	// blocks a value secrets-guard itself resolved.
+	// if the value was never referenced this session. The values come from the user's
+	// own local ksm/op profile and live only in the in-memory cache — on every platform,
+	// Windows included (there is no system service). `auto` (default) and `on` enable it;
+	// `off` disables it (only session-resolved values are guarded). It is the proactive
+	// complement to the always-on backstop that blocks a value secrets-guard itself resolved.
 	PreloadSecrets string // auto | on | off
 
 	// GuardRequired controls FAIL-CLOSED behavior when the redaction guard cannot verify a
-	// text (on Windows, the sandbox-dlp service — the sole value store — is unreachable).
-	//   auto (default): fail closed ONLY where the service is actually deployed and
-	//     running (or can be started). On a machine where it was never provisioned (e.g.
-	//     WinFsp not installed) the guard degrades to the built-in pattern detector instead
-	//     of blocking every prompt/tool — so an incomplete install does not brick the CLI.
-	//   on: always fail closed when the guard is unavailable (strict; blocks everything
-	//     until the service is up). For high-assurance fleets that guarantee the service.
+	// text because the vault values could not be loaded (the local ksm/op profile is not
+	// initialized or failed to load).
+	//   auto (default): degrade to the built-in pattern detector instead of blocking, so a
+	//     machine without a working vault is not bricked.
+	//   on: fail closed — block prompts, tool inputs and tool outputs that cannot be
+	//     verified against the vault. For high-assurance fleets where every machine has a
+	//     working profile and redaction is mandatory.
 	//   off: never fail closed (always degrade to the detector).
 	GuardRequired string // auto | on | off
 

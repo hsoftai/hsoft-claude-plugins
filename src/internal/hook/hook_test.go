@@ -259,10 +259,9 @@ func TestPreToolUse_ResolvesVaultReference(t *testing.T) {
 }
 
 // The model must not resolve a secret itself: a command that invokes the vault CLI
-// directly (op read, ksm secret notation, …) is DENIED. Only the sandbox-dlp service
-// holds the vault credential and resolves references, serving the value solely to the
-// command's own subtree — so a direct CLI call can never pull a plaintext value into the
-// model's reach.
+// directly (op read, ksm secret notation, …) is DENIED, because its output would pull a
+// plaintext value into the model's reach and defeat redaction. Resolution happens inside
+// the hook/sandbox, never in a model-visible command.
 func TestPreToolUse_VaultCLIDirectlyDenied(t *testing.T) {
 	cfg := defaultCfg()
 	cfg.ToolOutputMode = "off" // isolate from output wrapping

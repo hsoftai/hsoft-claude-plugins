@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-06-27
+
+### Changed
+- **Corrected stale option descriptions that referenced the removed `sandbox-dlp` service.**
+  The `preload_secrets` and `guard_required` settings (and their config comments) still said
+  the Windows credential holder was the `sandbox-dlp` service and that the guard degrades
+  when that service is "unreachable." That service was removed in 0.6.0: on every platform,
+  Windows included, the vault values live in the per-session in-memory cache loaded from the
+  user's own local ksm/op profile — there is no service to install or reach. The descriptions
+  now reflect the local model, so a misconfiguration (e.g. `preload_secrets=off` or an
+  uninitialized profile) is no longer misdiagnosed as a missing service. `dlp_install_source`
+  and `kernel_dlp` are documented as deprecated no-ops.
+
+### Removed
+- Dead code: `ExportKeeperConfig`, `DeleteKeeperProfile`, `VerifyKeeperConfig` (part of the
+  old service's credential-handoff flow; unused since the local model).
+
 ## [0.7.2] - 2026-06-27
 
 ### Fixed

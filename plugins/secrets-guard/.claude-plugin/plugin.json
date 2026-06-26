@@ -1,7 +1,7 @@
 {
   "name": "secrets-guard",
   "displayName": "secrets-guard",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "Keep secrets out of the model: block plaintext secrets in prompts, resolve vault references (Keeper/1Password) into tool input, and redact secrets leaked in tool output.",
   "author": {
     "name": "Humphrey Consulting Group"
@@ -103,13 +103,13 @@
     "preload_secrets": {
       "type": "string",
       "title": "Proactive full-vault redaction guard",
-      "description": "Load every value the vault exposes into memory and redact or block any of them (in any encoding) in prompts, tool inputs, tool outputs and file reads — even values never referenced this session — so a known vault secret can never reach the model. On macOS/Linux the values live in the per-session cache; on Windows in the sandbox-dlp service (the credential holder). 'auto' (default) and 'on' enable it; 'off' limits the guard to values resolved during the session.",
+      "description": "Load every value the vault exposes into memory and redact or block any of them (in any encoding) in prompts, tool inputs, tool outputs and file reads — even values never referenced this session — so a known vault secret can never reach the model. On every platform (Windows included) the values live in the per-session in-memory cache, loaded from your own local ksm/op profile; there is no system service. 'auto' (default) and 'on' enable it; 'off' limits the guard to values resolved during the session (a file/tool read of an unreferenced vault secret is then NOT redacted, so keep this on for full coverage).",
       "default": "auto"
     },
     "guard_required": {
       "type": "string",
       "title": "Fail-closed policy",
-      "description": "What to do when the redaction guard cannot verify a text (on Windows: the sandbox-dlp service is unreachable). 'auto' (default) fails closed only where the service is actually running, so a machine that never installed it degrades to the built-in pattern detector instead of blocking every prompt and tool (an incomplete install does not brick the CLI). 'on' always fails closed when the guard is unavailable (strict; for fleets that guarantee the service). 'off' never fails closed.",
+      "description": "What to do when the redaction guard cannot verify a text because the vault values could not be loaded (e.g. the local ksm/op profile is not initialized or failed to load). 'auto' (default) degrades to the built-in pattern detector instead of blocking, so a machine without a working vault is not bricked. 'on' fails closed: it blocks prompts, tool inputs and tool outputs that cannot be verified against the vault (use where redaction is mandatory and every machine has a working profile). 'off' never fails closed.",
       "default": "auto"
     },
     "sandbox_globs": {
@@ -132,8 +132,8 @@
     },
     "dlp_install_source": {
       "type": "string",
-      "title": "sandbox-dlp installer source",
-      "description": "Override the base URL the plugin downloads the sandbox-dlp installer from (for air-gapped or on-prem mirrors). Leave empty to use the default GitHub release.",
+      "title": "Installer source (deprecated, no-op)",
+      "description": "DEPRECATED / no-op. secrets-guard no longer downloads or installs any system service (the old sandbox-dlp / WinFsp component was removed); it runs entirely per-user from the local ksm/op profile. Kept only for backward compatibility and ignored.",
       "default": ""
     }
   }

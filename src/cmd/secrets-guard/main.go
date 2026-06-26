@@ -321,9 +321,8 @@ func runMCP() {
 	cfg := config.Load(os.Getenv)
 
 	cat := func() (catalog.Catalog, error) {
-		// On the Windows kernel-DLP path the client holds no vault credential — only the
-		// sandbox-dlp service does — so catalog operations are proxied to it. Elsewhere the
-		// local vault is used directly.
+		// Catalog operations use the user's own local ksm/op profile directly (the local
+		// model — there is no service to proxy to).
 		return mcpCatalog(cfg)
 	}
 	jsonText := func(v any) (string, error) {

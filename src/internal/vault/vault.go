@@ -61,34 +61,6 @@ func (execRunner) Run(name string, args ...string) (string, error) {
 // NewRunner returns the production Runner.
 func NewRunner() Runner { return execRunner{} }
 
-// ExportKeeperConfig returns the base64 KSM_CONFIG of the local Keeper Secrets Manager
-// profile (`ksm profile export --file-format json`). The sandbox-dlp service ingests this
-// ONCE into its own protected store, then removes the local profile so that only the
-// service — never a bare `ksm` invocation by any other process — can resolve references.
-func ExportKeeperConfig() (string, error) {
-	out, err := execRunner{}.Run(keeperBin(execRunner{}), "profile", "export", "--file-format", "json")
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(out), nil
-}
-
-// DeleteKeeperProfile removes the local Keeper Secrets Manager profile from OS-native
-// storage (the Windows Credential Manager / keyring), so a bare `ksm` can no longer
-// resolve. Only a holder of KSM_CONFIG (the service, from its protected store) can.
-func DeleteKeeperProfile() error {
-	_, err := execRunner{}.Run(keeperBin(execRunner{}), "profile", "delete", "_default")
-	return err
-}
-
-// VerifyKeeperConfig confirms the ambient KSM_CONFIG can reach Keeper by listing secret
-// metadata (titles/UIDs, never values). The service uses it to gate the destructive
-// profile delete, so removing the local profile can never strand it without a credential.
-func VerifyKeeperConfig() error {
-	_, err := execRunner{}.Run(keeperBin(execRunner{}), "secret", "list")
-	return err
-}
-
 // anyRefRe matches a reference of any known vault scheme.
 // refChars covers the characters valid in a vault reference: path segments, the
 // bracketed predicates of Keeper notation, and the ?attribute=… query of a

@@ -99,11 +99,10 @@ type Config struct {
 	// pattern) to treat as command-execution tools, from the shell_tools option.
 	ShellTools []string
 	// RequireGuard makes the known-value redaction guard FAIL CLOSED: when the value
-	// store is unavailable (e.g. on Windows the sandbox-dlp service — the sole holder of
-	// the vault values — is down), a prompt, tool input, or tool output cannot be cleared
-	// and is blocked instead of allowed. Set where the guard is mandatory and there is no
-	// local fallback (Windows + redaction guard on), so a crashed service can never
-	// silently let a secret reach the model.
+	// store is unavailable (the per-session in-memory cache could not be loaded from the
+	// local ksm/op profile), a prompt, tool input, or tool output cannot be cleared
+	// and is blocked instead of allowed. Set where the guard is mandatory, so a vault that
+	// fails to load can never silently let a secret reach the model.
 	RequireGuard bool
 	// GuardReady is false when a vault IS configured but its values could not be loaded into
 	// the cache (e.g. the ksm/op profile failed to load). In that state the guard cannot
@@ -212,7 +211,7 @@ func (h *Handler) checkGuard(session, text string) (guardStatus, string) {
 }
 
 // guardUnavailableOutput is the fail-closed decision when the mandatory redaction guard
-// cannot verify a text (the value store / sandbox-dlp service is down).
+// cannot verify a text (the per-session value cache could not be loaded from the vault).
 func guardUnavailableBlock(event string) Output {
 	msg := "🛑 secrets-guard: no se pudo verificar el texto contra la bóveda (el perfil ksm/op " +
 		"no está disponible) y guard_required=on exige garantía, así que se bloquea por seguridad " +
@@ -381,10 +380,9 @@ func (h *Handler) handlePreTool(in Input) Output {
 			if cmd, ok := m["command"].(string); ok && cmd != "" {
 				// 1.5) The model must not resolve secrets itself: deny a command that
 				// invokes the vault CLI (ksm/keeper/op) or `secrets-guard read|run`
-				// directly. Only the sandbox-dlp service holds the vault credential and
-				// renders references into the per-command mount; a direct CLI call would
-				// pull plaintext values into the model's reach. (Defense in depth — the
-				// credential is also withheld from every process but the service.)
+				// directly. A direct CLI call would pull plaintext values into the model's
+				// reach, defeating redaction; the model should put the reference in a config
+				// file and let the sandbox render it at execution instead.
 				if reason, blocked := blockedVaultCLI(cmd); blocked {
 					h.Last = Decision{Event: "PreToolUse", Action: "deny"}
 					return Output{HookSpecificOutput: &HookSpecificOutput{
@@ -694,8 +692,8 @@ func (h *Handler) processBashCommand(cmd string) (newCmd string, refs []string, 
 
 // vaultCLIRe matches a direct invocation of a vault CLI (Keeper's ksm/keeper-ksm,
 // Keeper Commander, or 1Password's op) at a command position, followed by a subcommand
-// that reads or manages secrets. The model must never call these itself — only the
-// sandbox-dlp service may resolve references.
+// that reads or manages secrets. The model must never call these itself — resolution
+// happens inside the sandbox/hook, never in a command whose output reaches the model.
 var vaultCLIRe = regexp.MustCompile(`(?i)(?:^|[\s;&|(` + "`" + `])(?:ksm|keeper-ksm|keeper|op)\s+(?:secret|profile|read|item|inject|get|notation|list|exec|init|run)\b`)
 
 // sgResolveRe matches `secrets-guard read|run`, the CLI subcommands that themselves
@@ -708,8 +706,8 @@ var sgResolveRe = regexp.MustCompile(`(?i)\bsecrets-guard\s+(?:read|run)\b`)
 func blockedVaultCLI(cmd string) (string, bool) {
 	if vaultCLIRe.MatchString(cmd) || sgResolveRe.MatchString(cmd) {
 		return "secrets-guard: no ejecutes el CLI de la bóveda (ksm/keeper/op) ni " +
-			"`secrets-guard read|run` directamente — solo el servicio sandbox-dlp tiene la " +
-			"credencial y resuelve secretos, sirviéndolos únicamente al subárbol del comando. " +
+			"`secrets-guard read|run` directamente — eso traería el valor en texto plano al " +
+			"contexto del modelo y rompería la redacción. " +
 			"Usa la referencia (op://… / keeper://…) en un archivo de configuración y deja que " +
 			"el sandbox la renderice al ejecutar el comando.", true
 	}
