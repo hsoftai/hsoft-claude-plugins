@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -61,18 +62,19 @@ func TestLocalGuardRedactsFileReadValue(t *testing.T) {
 		ToolResponse:  []byte(`{"content":"# notes\nDB_PASSWORD=` + secret + `\nother stuff"}`),
 		SessionID:     sess,
 	})
-	if out.Decision != "block" {
-		t.Fatalf("a file read containing a cached vault value must be BLOCKED, got %+v", out)
+	o := out.HookSpecificOutput
+	if o == nil || o.UpdatedToolOutput == "" || strings.Contains(o.UpdatedToolOutput, secret) {
+		t.Fatalf("a file read with a cached vault value must be REDACTED in place (value removed), got %+v", out)
 	}
 
-	// Sanity: a file with no vault value is not blocked.
+	// Sanity: a file with no vault value is passed through unchanged (no block, no rewrite).
 	clean := h.Handle(hook.Input{
 		HookEventName: "PostToolUse",
 		ToolName:      "Read",
 		ToolResponse:  []byte(`{"content":"# notes\nnothing secret here"}`),
 		SessionID:     sess,
 	})
-	if clean.Decision == "block" {
-		t.Fatalf("a clean file read must not be blocked, got %+v", clean)
+	if clean.Decision == "block" || clean.HookSpecificOutput != nil {
+		t.Fatalf("a clean file read must pass through unchanged, got %+v", clean)
 	}
 }

@@ -166,7 +166,8 @@ func NewHandler(cfg Config, eng *detect.Engine, red *redact.Redactor, vault Reso
 // (no disk values) and is only paid when the cache missed — the common case (truly
 // clean text) is a single inexpensive re-resolve, and a real hit short-circuits it.
 func (h *Handler) knownInText(session, text string) bool {
-	return h.checkGuard(session, text) == guardHit
+	s, _ := h.checkGuard(session, text)
+	return s == guardHit
 }
 
 // guardStatus is the outcome of checking a text against the known-value guard.
@@ -178,37 +179,37 @@ const (
 	guardUnavailable                    // could NOT verify (store down) and no fallback — fail closed
 )
 
-// checkGuard reports whether text carries a resolved/known secret value. A cache HIT is
-// authoritative (a positive is never an amnesiac false negative). On a cache MISS we
-// corroborate against the durable reference ledger. When the cache is UNAVAILABLE:
-// without a mandatory guard we fall back to the ledger (Unix, where the local cache
-// normally works); with RequireGuard set (Windows, where the sandbox-dlp service is the
-// only value store and there is no local fallback) we cannot verify, so we return
-// guardUnavailable and the caller FAILS CLOSED — a down service can never silently leak.
-func (h *Handler) checkGuard(session, text string) guardStatus {
-	found, _, ok := h.cache.Scan(session, text)
+// checkGuard reports whether text carries a resolved/known secret value, AND returns the
+// text with every such value redacted (for in-place censoring of tool output). A cache HIT
+// is authoritative (a positive is never an amnesiac false negative). On a cache MISS we
+// corroborate against the durable reference ledger. When the cache is UNAVAILABLE: without
+// a mandatory guard we fall back to the ledger; with RequireGuard set we cannot verify, so
+// we return guardUnavailable and the caller fails closed. The redacted string equals the
+// original text when nothing matched.
+func (h *Handler) checkGuard(session, text string) (guardStatus, string) {
+	found, redacted, ok := h.cache.Scan(session, text)
 	if ok {
 		if found {
-			return guardHit
+			return guardHit, redacted
 		}
-		return guardClean // cache authoritative
+		return guardClean, text // cache authoritative
 	}
-	// Cache unavailable. On Windows the service is the sole store with no local fallback.
+	// Cache unavailable.
 	if h.cfg.RequireGuard {
-		return guardUnavailable
+		return guardUnavailable, text
 	}
-	if seen.Contains(text, h.sessionValues(session)) {
-		return guardHit
+	if red, n := seen.Redact(text, h.sessionValues(session)); n > 0 {
+		return guardHit, red
 	}
-	return guardClean
+	return guardClean, text
 }
 
 // guardUnavailableOutput is the fail-closed decision when the mandatory redaction guard
 // cannot verify a text (the value store / sandbox-dlp service is down).
 func guardUnavailableBlock(event string) Output {
-	msg := "🛑 secrets-guard: el servicio de protección (sandbox-dlp) no está disponible, " +
-		"así que no se puede garantizar que no se filtre un secreto al modelo. Se bloquea por " +
-		"seguridad (fail-closed). Inicia el servicio sandbox-dlp (o ejecuta su instalador) y reintenta."
+	msg := "🛑 secrets-guard: no se pudo verificar el texto contra la bóveda (el perfil ksm/op " +
+		"no está disponible) y guard_required=on exige garantía, así que se bloquea por seguridad " +
+		"(fail-closed). Inicializa tu perfil de bóveda (ksm/op) y reintenta, o usa guard_required=auto."
 	if event == "PreToolUse" {
 		return Output{HookSpecificOutput: &HookSpecificOutput{
 			HookEventName:            "PreToolUse",
@@ -256,7 +257,7 @@ func (h *Handler) handlePrompt(in Input) Output {
 	// proactive guard, every vault value is preloaded into the session cache, so this
 	// blocks a pasted secret even when it matches no heuristic detector pattern. The
 	// detector scan below is the additional, tunable best-effort layer.
-	switch h.checkGuard(in.SessionID, in.Prompt) {
+	switch s, _ := h.checkGuard(in.SessionID, in.Prompt); s {
 	case guardHit:
 		h.Last = Decision{Event: "UserPromptSubmit", Action: "block", Count: 1}
 		return Output{
@@ -313,7 +314,7 @@ func (h *Handler) handlePreTool(in Input) Output {
 	// 0) The model must never handle a resolved secret value directly. If the
 	// tool input contains a value already resolved this session (in any
 	// encoding), deny it — the model should use the reference instead.
-	switch h.checkGuard(in.SessionID, joined) {
+	switch s, _ := h.checkGuard(in.SessionID, joined); s {
 	case guardHit:
 		h.Last = Decision{Event: "PreToolUse", Action: "deny"}
 		return Output{HookSpecificOutput: &HookSpecificOutput{
@@ -538,22 +539,23 @@ func (h *Handler) handlePostTool(in Input) Output {
 	// In sandbox mode the inline redact-stream wrap is disabled, so this is the
 	// ONLY thing standing between a rendered vault secret printed by a Bash command
 	// and the transcript — gating it on ToolOutputMode would silently leak it.
-	switch h.checkGuard(in.SessionID, text) {
+	switch status, redacted := h.checkGuard(in.SessionID, text); status {
 	case guardHit:
-		h.Last = Decision{Event: "PostToolUse", Action: "block", Count: 1}
-		return Output{
-			Decision: "block",
-			Reason:   "secrets-guard: resolved secret present in tool output",
-			SystemMessage: "🛑 secrets-guard retuvo la salida: contiene un secreto ya resuelto en esta sesión " +
-				"(posible fuga al leerlo de vuelta). El valor no se entregó al modelo; usa la referencia de bóveda.",
-		}
+		// REDACT IN PLACE: the model receives the tool output with the secret value(s)
+		// replaced by the placeholder, not a withheld result. The original stays in the
+		// session transcript; only what the model sees is censored.
+		h.Last = Decision{Event: "PostToolUse", Action: "redact", Count: 1}
+		return Output{HookSpecificOutput: &HookSpecificOutput{
+			HookEventName:     "PostToolUse",
+			UpdatedToolOutput: redacted,
+		}}
 	case guardUnavailable:
 		h.Last = Decision{Event: "PostToolUse", Action: "block"}
 		return guardUnavailableBlock("PostToolUse")
 	}
 
-	// Detector-based scanning/blocking of arbitrary (not session-resolved) secrets
-	// is the tunable part: `off` disables it.
+	// Detector-based scanning of arbitrary (not vault-known) secrets is the tunable part:
+	// `off` disables it.
 	if h.cfg.ToolOutputMode == "off" {
 		h.Last = Decision{Event: "PostToolUse", Action: "allow"}
 		return Output{}
@@ -564,20 +566,24 @@ func (h *Handler) handlePostTool(in Input) Output {
 		h.Last = Decision{Event: "PostToolUse", Action: "allow"}
 		return Output{}
 	}
-	// Claude Code 2.1.x does not honor PostToolUse output rewriting, so the only
-	// reliable client-side guarantee is to withhold the output. Bash output is
-	// already redacted inline by the PreToolUse wrap; this is the safety net for
-	// non-Bash tools (Read, Grep, ...) and for the block policy.
 	cats := categories(findings)
-	h.Last = Decision{Event: "PostToolUse", Action: "block", Categories: cats, Count: len(findings)}
-	return Output{
-		Decision: "block",
-		Reason:   "secrets-guard: secret detected in tool output",
-		SystemMessage: fmt.Sprintf(
-			"🛑 secrets-guard retuvo la salida de la herramienta: contiene un secreto (%s). "+
-				"El valor no se entregó al modelo. Usa una referencia de bóveda en lugar de exponer el secreto.",
-			strings.Join(cats, ", ")),
+	if h.cfg.ToolOutputMode == "block" {
+		h.Last = Decision{Event: "PostToolUse", Action: "block", Categories: cats, Count: len(findings)}
+		return Output{
+			Decision: "block",
+			Reason:   "secrets-guard: secret detected in tool output",
+			SystemMessage: fmt.Sprintf(
+				"🛑 secrets-guard retuvo la salida de la herramienta: contiene un secreto (%s). "+
+					"El valor no se entregó al modelo.", strings.Join(cats, ", ")),
+		}
 	}
+	// Default: redact the detected secrets in place so the model sees a censored output.
+	red, _ := h.red.Redact(text)
+	h.Last = Decision{Event: "PostToolUse", Action: "redact", Categories: cats, Count: len(findings)}
+	return Output{HookSpecificOutput: &HookSpecificOutput{
+		HookEventName:     "PostToolUse",
+		UpdatedToolOutput: red,
+	}}
 }
 
 // wrapBashCommand rewrites a Bash tool_input so the command's stdout and stderr

@@ -3,7 +3,20 @@ package vault
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
+
+// nonSecretFieldType reports whether a vault field holds identity / non-secret data (a
+// username, email, or URL) that should be LEFT VISIBLE in tool output. Only the password
+// and other secret fields are loaded into the redaction guard — so for a login record the
+// password is censored but the username stays readable.
+func nonSecretFieldType(t string) bool {
+	switch strings.ToLower(strings.TrimSpace(t)) {
+	case "login", "email", "url":
+		return true
+	}
+	return false
+}
 
 // bulkMinLen is the shortest value worth preloading into the redaction guard. It is
 // higher than the per-reference floor (seen.minLen = 4) on purpose: the bulk guard
@@ -92,10 +105,12 @@ func keeperAllValues(r Runner) ([]string, error) {
 		}
 		var rec struct {
 			Fields []struct {
-				Value []any `json:"value"`
+				Type  string `json:"type"`
+				Value []any  `json:"value"`
 			} `json:"fields"`
 			Custom []struct {
-				Value []any `json:"value"`
+				Type  string `json:"type"`
+				Value []any  `json:"value"`
 			} `json:"custom"`
 			Notes string `json:"notes"`
 		}
@@ -103,9 +118,15 @@ func keeperAllValues(r Runner) ([]string, error) {
 			continue
 		}
 		for _, f := range rec.Fields {
+			if nonSecretFieldType(f.Type) {
+				continue // leave usernames/emails/urls visible — only secrets are redacted
+			}
 			col.walk(f.Value)
 		}
 		for _, f := range rec.Custom {
+			if nonSecretFieldType(f.Type) {
+				continue
+			}
 			col.walk(f.Value)
 		}
 		col.add(rec.Notes)
@@ -137,13 +158,18 @@ func onePasswordAllValues(r Runner) ([]string, error) {
 		}
 		var rec struct {
 			Fields []struct {
-				Value string `json:"value"`
+				ID      string `json:"id"`
+				Purpose string `json:"purpose"`
+				Value   string `json:"value"`
 			} `json:"fields"`
 		}
 		if json.Unmarshal([]byte(raw), &rec) != nil {
 			continue
 		}
 		for _, f := range rec.Fields {
+			if strings.EqualFold(f.Purpose, "USERNAME") || strings.EqualFold(f.ID, "username") {
+				continue // leave the username visible — only the password/secret fields are redacted
+			}
 			col.add(f.Value)
 		}
 	}

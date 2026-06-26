@@ -375,6 +375,17 @@ func TestPreToolUse_CoworkModeKeepsReferenceLiteral(t *testing.T) {
 
 // In Cowork mode there is no Bash output wrap, so PostToolUse must block Bash
 // output that leaks a known resolved value.
+// censored reports whether a secret never reaches the model in a PostToolUse result: the
+// output was either withheld (block) or rewritten with the value redacted out
+// (updatedToolOutput present and not containing the secret).
+func censored(out Output, secret string) bool {
+	if out.Decision == "block" {
+		return true
+	}
+	o := out.HookSpecificOutput
+	return o != nil && o.UpdatedToolOutput != "" && !strings.Contains(o.UpdatedToolOutput, secret)
+}
+
 func TestPostToolUse_CoworkModeBlocksBashLeak(t *testing.T) {
 	cfg := defaultCfg()
 	cfg.CoworkMode = true
@@ -387,8 +398,8 @@ func TestPostToolUse_CoworkModeBlocksBashLeak(t *testing.T) {
 		SessionID:     "s1",
 		ToolResponse:  json.RawMessage(`"the value is RESOLVED_SECRET oops"`),
 	})
-	if out.Decision != "block" {
-		t.Fatalf("Cowork-mode Bash leak must be blocked, got %+v", out)
+	if !censored(out, "RESOLVED_SECRET") {
+		t.Fatalf("Cowork-mode Bash leak must be censored, got %+v", out)
 	}
 }
 
@@ -568,7 +579,7 @@ func TestPostToolUse_BacksopBlocksWrappedBashLeak(t *testing.T) {
 		HookEventName: "PostToolUse", ToolName: "Bash", SessionID: "s1",
 		ToolResponse: json.RawMessage(`"oops RESOLVED_SECRET leaked"`),
 	})
-	if out.Decision != "block" {
+	if !censored(out, "RESOLVED_SECRET") {
 		t.Fatalf("a defeated wrap must still be caught server-side, got %+v", out)
 	}
 }
@@ -611,8 +622,8 @@ func TestPostToolUse_BlocksLeakedSecret(t *testing.T) {
 		ToolName:      "Read",
 		ToolResponse:  json.RawMessage(`"the key is AKIAIOSFODNN7EXAMPLE done"`),
 	})
-	if out.Decision != "block" {
-		t.Fatalf("expected block on leaked secret, got %+v", out)
+	if !censored(out, "FODNN7EXAMPLE") {
+		t.Fatalf("expected the leaked secret to be censored, got %+v", out)
 	}
 }
 
@@ -677,8 +688,8 @@ func TestPostToolUse_OffModeStillBlocksResolvedValueLeak(t *testing.T) {
 		SessionID:     "s1",
 		ToolResponse:  json.RawMessage(`"the sandbox rendered RESOLVED_SECRET and the command printed it"`),
 	})
-	if out.Decision != "block" {
-		t.Fatalf("off mode must still block a value secrets-guard resolved this session, got %+v", out)
+	if !censored(out, "RESOLVED_SECRET") {
+		t.Fatalf("off mode must still censor a value secrets-guard resolved this session, got %+v", out)
 	}
 }
 
@@ -851,7 +862,7 @@ func TestPostToolUse_McpContentShapeBlocksLeak(t *testing.T) {
 		HookEventName: "PostToolUse", ToolName: "mcp__workspace__bash", SessionID: "s1",
 		ToolResponse: json.RawMessage(`{"content":[{"type":"text","text":"the value is RESOLVED_SECRET here"}]}`),
 	})
-	if out.Decision != "block" {
-		t.Fatalf("MCP-shaped output leak must be blocked, got %+v", out)
+	if !censored(out, "RESOLVED_SECRET") {
+		t.Fatalf("MCP-shaped output leak must be censored, got %+v", out)
 	}
 }

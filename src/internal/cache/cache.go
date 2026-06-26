@@ -79,12 +79,14 @@ type request struct {
 	Op     string   `json:"op"`
 	Values []string `json:"values,omitempty"`
 	Text   string   `json:"text,omitempty"`
+	Primed bool     `json:"primed,omitempty"` // an `add` that marks the full vault loaded
 }
 
 type response struct {
 	OK       bool   `json:"ok"`
 	Found    bool   `json:"found,omitempty"`
 	Redacted string `json:"redacted,omitempty"`
+	Primed   bool   `json:"primed,omitempty"` // (status) whether the full vault was loaded
 }
 
 // --- daemon ---
@@ -93,6 +95,7 @@ type server struct {
 	mu     sync.Mutex
 	values []string
 	known  map[string]struct{}
+	primed bool // the full vault has been loaded into this session's cache at least once
 }
 
 // RunDaemon serves the cache for one session until shutdown or idle timeout.
@@ -167,6 +170,14 @@ func (s *server) handle(conn net.Conn) (shutdown bool) {
 				s.values = append(s.values, v)
 			}
 		}
+		if rq.Primed {
+			s.primed = true // the caller loaded the full vault (even if it was empty)
+		}
+		s.mu.Unlock()
+		rp.OK = true
+	case "status":
+		s.mu.Lock()
+		rp.Primed = s.primed
 		s.mu.Unlock()
 		rp.OK = true
 	case "scan":
@@ -268,6 +279,21 @@ func (Client) Add(session string, values []string) {
 		return
 	}
 	roundtrip(session, request{Op: "add", Values: values}, true)
+}
+
+// AddPrimed caches values AND marks the session as primed (the full vault has been loaded),
+// so callers can avoid reloading it on every hook event. Spawns the daemon; marks primed
+// even when values is empty (a genuinely empty vault is still "loaded").
+func (Client) AddPrimed(session string, values []string) {
+	roundtrip(session, request{Op: "add", Values: values, Primed: true}, true)
+}
+
+// Primed reports whether the full vault has been loaded into this session's cache. false
+// when the daemon is unreachable (caller should then load + AddPrimed). Does NOT spawn the
+// daemon — a missing daemon means "not primed yet".
+func (Client) Primed(session string) bool {
+	rp, ok := roundtrip(session, request{Op: "status"}, false)
+	return ok && rp.Primed
 }
 
 // Scan asks the cache whether text contains a cached value and for the redacted

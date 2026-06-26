@@ -34,14 +34,15 @@ func TestAllSecretValues_Keeper(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Every field/custom value and the notes are collected.
-	for _, want := range []string{"dbadmin", "S3cretPassw0rd", "tok_abcdef123456", "AnotherPass99", "a memorable note"} {
+	// Secret field/custom values and notes are collected (password, custom token, notes).
+	for _, want := range []string{"S3cretPassw0rd", "tok_abcdef123456", "AnotherPass99", "a memorable note"} {
 		if !contains(vals, want) {
 			t.Errorf("expected value %q to be collected, got %v", want, vals)
 		}
 	}
-	// Metadata (title, uid, field type/label) is NEVER collected.
-	for _, no := range []string{"prod-db", "UID1", "UID2", "login", "password", "token"} {
+	// The username (login field) is LEFT VISIBLE — only secrets are redacted. Metadata
+	// (title, uid, field type/label) is never collected either.
+	for _, no := range []string{"dbadmin", "prod-db", "UID1", "UID2", "login", "password", "token"} {
 		if contains(vals, no) {
 			t.Errorf("metadata %q must not be collected as a value, got %v", no, vals)
 		}
@@ -66,18 +67,20 @@ func TestAllSecretValues_OnePassword(t *testing.T) {
 	m := &mockRunner{
 		present: map[string]bool{"op": true},
 		outputs: map[string]string{
-			"op item list --format json":              `[{"id":"abc123"}]`,
-			"op item get --format json -- abc123":     `{"id":"abc123","title":"api","fields":[{"label":"password","value":"hunter2hunter"},{"label":"username","value":"svc-acct"}]}`,
+			"op item list --format json":          `[{"id":"abc123"}]`,
+			"op item get --format json -- abc123": `{"id":"abc123","title":"api","fields":[{"id":"password","purpose":"PASSWORD","value":"hunter2hunter"},{"id":"username","purpose":"USERNAME","value":"svc-acct"}]}`,
 		},
 	}
 	vals, err := AllSecretValues(m, "1password")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"hunter2hunter", "svc-acct"} {
-		if !contains(vals, want) {
-			t.Errorf("expected %q, got %v", want, vals)
-		}
+	if !contains(vals, "hunter2hunter") {
+		t.Errorf("password must be collected, got %v", vals)
+	}
+	// The username (purpose USERNAME) is left visible — not loaded into the guard.
+	if contains(vals, "svc-acct") {
+		t.Errorf("username must NOT be collected (left visible), got %v", vals)
 	}
 }
 

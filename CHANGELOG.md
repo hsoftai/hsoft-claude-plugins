@@ -6,6 +6,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-26
+
+### Changed
+- **Tool output is now REDACTED IN PLACE, not blocked.** When a tool result (e.g. a `Read`
+  of a file) contains a vault value or a detected secret, the model now receives the output
+  with the secret replaced by the placeholder (`updatedToolOutput`) instead of the whole
+  result being withheld. The original stays in the transcript. `tool_output_mode=block`
+  still withholds; `redact` (default) censors in place.
+- **For login records, only the password is redacted — the username stays visible.** The
+  guard no longer loads username/email/url fields (Keeper `login`/`email`/`url` types, or
+  1Password `USERNAME` purpose) into the redaction set, so reading a file that has both a
+  username and a password censors only the password.
+
+### Fixed
+- **Consistent detection.** Redaction depended on an async SessionStart preload populating
+  the per-session cache, which could lose the race or expire — so detection was
+  intermittent. The hook now guarantees the cache is primed before scanning any prompt or
+  tool I/O: it loads the full vault synchronously on the first scanning event if not already
+  primed (then it is cached for the session). Every Read/tool output is now always scanned
+  against every vault value.
+
 ## [0.6.4] - 2026-06-26
 
 ### Fixed

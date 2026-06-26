@@ -178,6 +178,16 @@ func runHook() {
 	if cfg.IsCowork {
 		h.SetCoworkAnchor(coworkAnchor{})
 	}
+	// CONSISTENCY: before scanning a prompt or tool I/O, guarantee the full vault is loaded
+	// into this session's cache. The SessionStart preload is async and can lose the race (or
+	// the daemon may have expired), which made redaction intermittent. This loads the vault
+	// synchronously on the first scanning event if it isn't primed yet (then it's cached for
+	// the rest of the session), so every Read/tool output is always scanned against every
+	// value.
+	switch in.HookEventName {
+	case "UserPromptSubmit", "PreToolUse", "PostToolUse":
+		ensureCachePrimed(cfg, in.SessionID)
+	}
 	out := h.Handle(in)
 
 	audit.New(cfg.AuditLogPath).Log(audit.Record{
@@ -211,9 +221,28 @@ func runPreloadSecrets() {
 		fmt.Fprintln(os.Stderr, "secrets-guard: preload:", err)
 		return
 	}
-	if len(vals) > 0 {
-		cache.New().Add(session, vals)
+	// AddPrimed marks the session loaded (even if the vault is empty), so the hook does not
+	// reload it on the first tool event.
+	cache.New().AddPrimed(session, vals)
+}
+
+// ensureCachePrimed guarantees the full vault is loaded into the session cache before a
+// scanning hook event runs. It is a no-op once primed (a cheap status round-trip), so only
+// the first scanning event of a session — when the async SessionStart preload has not won
+// the race yet — pays the synchronous vault load. This makes redaction consistent: every
+// prompt/tool I/O is scanned against every vault value, not against a possibly-cold cache.
+func ensureCachePrimed(cfg config.Config, session string) {
+	if session == "" || !cfg.PreloadEnabled() {
+		return
 	}
+	if cache.New().Primed(session) {
+		return
+	}
+	vals, err := allVaultValues(cfg)
+	if err != nil {
+		return // vault not ready — retry on the next event (do not mark primed)
+	}
+	cache.New().AddPrimed(session, vals)
 }
 
 // spawnPreloadSecrets starts the detached `preload-secrets` child for a session so
