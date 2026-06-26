@@ -20,12 +20,12 @@ value at execution time. You only ever see the reference.
 3. Put references verbatim into the tool that needs the secret (Write content,
    Bash command, config file). Do not modify them.
 4. **Never run the vault CLI yourself** (`ksm`, `keeper`, `op`, or `secrets-guard
-   read|run`) in a Bash command — the hook denies it. Only the secrets-guard
-   service holds the vault credential. To inspect or create secrets, use the **MCP
-   tools** (`list_secrets`, `search_secrets`, `list_fields`, `create_secret`,
-   `vault_status`); they run the operation through the service and return metadata
-   and references only — never a value. To *use* a secret, put its reference in a
-   `.env`/config or command and run the command normally (see "Running code").
+   read|run`) in a Bash command — the hook denies it, so a raw secret value can't be
+   pulled into your context. To inspect or create secrets, use the **MCP tools**
+   (`list_secrets`, `search_secrets`, `list_fields`, `create_secret`, `vault_status`);
+   they read the local vault and return metadata and references only — never a value.
+   To *use* a secret, put its reference in a `.env`/config or command and run the
+   command normally (see "Running code").
 
 ## Workflow
 
@@ -50,9 +50,9 @@ key", "write the DB password into .env"):
      reference. Pass `title`, the destination (`folder` — a Keeper Shared-Folder
      UID the app can edit, or a 1Password `vault` name), and `fields`
      (label→value, e.g. `{"login":"demo","password":"…"}`). The values are stored
-     in the vault through the service; only the new item's metadata + reference
-     come back. Use this instead of `op item create` / `ksm secret add` (those are
-     blocked, and the client has no credential).
+     in your local vault; only the new item's metadata + reference come back. Use
+     this instead of `op item create` / `ksm secret add` in Bash (those are blocked
+     by the hook so a value can't reach your context).
 2. **Pick** the field the user means (e.g. the `password` of item `prod-db`).
 3. **Use** its `reference`. How depends on the tool — see below.
 
@@ -172,8 +172,8 @@ and variable but not the value) and handle the value only through shell pipes.
 
 If the user accepts:
 
-1. **Add it to the vault with the `create_secret` MCP tool** (the service writes
-   it with its credential; you never call the vault CLI). Pass a `title`, the
+1. **Add it to the vault with the `create_secret` MCP tool** (it writes to your
+   local vault; you never call the vault CLI yourself). Pass a `title`, the
    destination (`folder` = a Keeper Shared-Folder UID the app can edit, or a
    1Password `vault` name) and the `fields` (label→value). The tool returns the new
    item's metadata and reference.

@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-06-26
+
+### Fixed
+- Documentation/skill consistency for the local model: the `using-vault-secrets` skill no
+  longer references a credential-holding service ("only the service holds the credential",
+  "the client has no credential") — the MCP tools read the user's local vault directly and
+  return metadata/references only.
+
 ## [0.6.0] - 2026-06-25
 
 ### Removed
