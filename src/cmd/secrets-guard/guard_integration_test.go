@@ -20,12 +20,12 @@ type nothingRunner struct{}
 func (nothingRunner) Look(string) bool                { return false }
 func (nothingRunner) Run(string, ...string) (string, error) { return "", nil }
 
-// TestLocalGuardRedactsFileReadValue exercises the EXACT local-model redaction path that
-// catches a vault value in a file the model reads: the per-session cache holds the value
-// (as the SessionStart preload loads it), and PostToolUse(Read) must block the output. If
-// this passes, a file-read leaking a value can only mean the cache was not populated (the
-// preload did not load the vault).
-func TestLocalGuardRedactsFileReadValue(t *testing.T) {
+// TestLocalGuardBlocksToolOutputValue exercises the local-model guard catching a vault
+// value in a tool output: the per-session cache holds the value and PostToolUse must BLOCK
+// the result (Claude Code does not reliably apply updatedToolOutput, so a confirmed vault
+// value is suppressed via decision:block). If this passes, a leaked value can only mean the
+// cache was not populated (the preload did not load the vault).
+func TestLocalGuardBlocksToolOutputValue(t *testing.T) {
 	dir, err := os.MkdirTemp("", "sgc-guard-it")
 	if err != nil {
 		t.Fatal(err)
@@ -62,9 +62,11 @@ func TestLocalGuardRedactsFileReadValue(t *testing.T) {
 		ToolResponse:  []byte(`{"content":"# notes\nDB_PASSWORD=` + secret + `\nother stuff"}`),
 		SessionID:     sess,
 	})
-	o := out.HookSpecificOutput
-	if o == nil || o.UpdatedToolOutput == "" || strings.Contains(o.UpdatedToolOutput, secret) {
-		t.Fatalf("a file read with a cached vault value must be REDACTED in place (value removed), got %+v", out)
+	if out.Decision != "block" {
+		t.Fatalf("a tool output with a cached vault value must be BLOCKED, got %+v", out)
+	}
+	if strings.Contains(out.Reason+out.SystemMessage, secret) {
+		t.Fatalf("the block message must not contain the secret value, got %+v", out)
 	}
 
 	// Sanity: a file with no vault value is passed through unchanged (no block, no rewrite).

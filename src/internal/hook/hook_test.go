@@ -3,6 +3,7 @@ package hook
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
@@ -642,6 +643,62 @@ func TestPostToolUse_PassthroughCleanOutput(t *testing.T) {
 // policy: with guard_required=on (RequireGuard), a vault IS configured (VaultName set) but its
 // values never loaded (GuardReady false), so the guard cannot prove the output is secret-free.
 // Even a seemingly clean output must be blocked rather than risk leaking a vault secret.
+// readInput builds a Read PreToolUse input with a JSON-safe file_path (Windows backslashes).
+func readInput(path string) json.RawMessage {
+	b, _ := json.Marshal(map[string]string{"file_path": path})
+	return b
+}
+
+// TestPreToolUse_ReadFileWithVaultValueDenied is the fix for the CC 2.1.x limitation where a
+// PostToolUse updatedToolOutput is NOT applied to Read's structured file content: a vault
+// value in a file would leak. The guard now DENIES the Read at PreToolUse (the content is
+// never produced). A clean file still reads normally.
+func TestPreToolUse_ReadFileWithVaultValueDenied(t *testing.T) {
+	dir := t.TempDir()
+	secretFile := filepath.Join(dir, "test.md")
+	if err := os.WriteFile(secretFile, []byte("user: admin\npasswd: RESOLVED_SECRET\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cleanFile := filepath.Join(dir, "clean.md")
+	if err := os.WriteFile(cleanFile, []byte("nothing secret here\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := defaultCfg()
+	cfg.VaultName = "keeper"
+	eng := detect.New()
+	// knownCache reports RESOLVED_SECRET as a known vault value and is reachable (ok=true).
+	h := NewHandler(cfg, eng, redact.New(eng), fakeResolver{value: "RESOLVED_SECRET"}, knownCache{}, "/opt/sg/bin/secrets-guard")
+
+	deny := h.Handle(Input{HookEventName: "PreToolUse", ToolName: "Read", ToolInput: readInput(secretFile)})
+	if deny.HookSpecificOutput == nil || deny.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("reading a file containing a vault value must be DENIED, got %+v", deny)
+	}
+
+	allow := h.Handle(Input{HookEventName: "PreToolUse", ToolName: "Read", ToolInput: readInput(cleanFile)})
+	if allow.HookSpecificOutput != nil && allow.HookSpecificOutput.PermissionDecision == "deny" {
+		t.Fatalf("reading a clean file must be allowed, got %+v", allow)
+	}
+}
+
+// TestPreToolUse_ReadFileGuardSkippedWithoutVault confirms the read-guard is inert when no
+// vault is configured (no file I/O, no deny) — a machine without a vault is not affected.
+func TestPreToolUse_ReadFileGuardSkippedWithoutVault(t *testing.T) {
+	dir := t.TempDir()
+	secretFile := filepath.Join(dir, "test.md")
+	if err := os.WriteFile(secretFile, []byte("passwd: RESOLVED_SECRET\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaultCfg() // VaultName == "" (no vault)
+	eng := detect.New()
+	h := NewHandler(cfg, eng, redact.New(eng), fakeResolver{value: "RESOLVED_SECRET"}, knownCache{}, "/opt/sg/bin/secrets-guard")
+
+	out := h.Handle(Input{HookEventName: "PreToolUse", ToolName: "Read", ToolInput: readInput(secretFile)})
+	if out.HookSpecificOutput != nil && out.HookSpecificOutput.PermissionDecision == "deny" {
+		t.Fatalf("without a vault the read-guard must not deny, got %+v", out)
+	}
+}
+
 func TestPostToolUse_BlocksWhenVaultNotLoaded(t *testing.T) {
 	cfg := defaultCfg()
 	cfg.RequireGuard = true

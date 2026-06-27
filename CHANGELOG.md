@@ -6,6 +6,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-06-27
+
+### Fixed
+- **`Read` of a file containing a vault secret is now blocked (it was leaking).** Claude Code
+  2.1.x does not apply a PostToolUse `updatedToolOutput` to the `Read` tool's structured file
+  content, so the in-place redaction never took effect and the secret reached the model —
+  even though detection was correct. There is no command to wrap at the source as there is
+  for Bash. The guard now inspects the target file at **PreToolUse** and DENIES the read
+  before it runs when the file contains a vault value (in any encoding); the content is never
+  produced. Files without a vault value read normally. Runs only when a vault is configured.
+  Trade-off: the whole read is blocked (Read cannot be partially redacted), so use the vault
+  reference (keeper://… / op://…) instead of the literal value.
+
+### Changed
+- **PostToolUse now BLOCKS a confirmed vault-value leak instead of redacting in place.**
+  Because `updatedToolOutput` is not reliably honored by Claude Code (ignored for Read,
+  unconfirmed for others), a redacted string could silently fail to apply. When the guard
+  finds a known vault value in a tool output it now returns `decision: "block"` (the
+  CC-sanctioned suppression). Detector-matched (non-vault) secrets still follow
+  `tool_output_mode` (redact/block/off).
+
 ## [0.7.3] - 2026-06-27
 
 ### Changed

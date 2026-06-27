@@ -4,15 +4,20 @@
 //
 //   - UserPromptSubmit: block a prompt that contains a plaintext secret.
 //   - PreToolUse:       resolve vault references into the tool input
-//     (updatedInput) so the model never sees the value, or deny a tool call
-//     that carries a plaintext secret.
-//   - PostToolUse:      redact secrets leaked in the tool result
-//     (updatedToolOutput), or block it.
+//     (updatedInput) so the model never sees the value; deny a tool call that
+//     carries a plaintext secret; and deny a Read whose target file contains a
+//     vault value (Claude Code cannot rewrite Read's structured output, so the
+//     read is blocked before it runs).
+//   - PostToolUse:      block a tool result that leaked a known vault value, and
+//     redact/block detector-matched secrets per tool_output_mode.
 package hook
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -333,6 +338,19 @@ func (h *Handler) handlePreTool(in Input) Output {
 		return guardUnavailableBlock("PreToolUse")
 	}
 
+	// 0.5) File-reading tools (Read) return the file CONTENT, which Claude Code does NOT let
+	// a PostToolUse hook rewrite: updatedToolOutput is not applied to Read's structured
+	// result in CC 2.1.x, so a vault value in the file would reach the model uncensored, and
+	// (unlike Bash) there is no command to wrap at the source. The robust control is to DENY
+	// the read before it runs when the target file contains a vault value — the content is
+	// never produced. Files without a vault value read normally. Only runs when a vault is
+	// configured (nothing to protect otherwise, and it avoids the file I/O cost).
+	if h.cfg.VaultName != "" && h.cfg.VaultName != "none" && isFileReadTool(in.ToolName) {
+		if out, handled := h.guardFileRead(in); handled {
+			return out
+		}
+	}
+
 	// 1) A plaintext secret in the tool input (vault refs are ignored by detect).
 	if findings := h.eng.Scan(joined); len(findings) > 0 {
 		cats := categories(findings)
@@ -546,14 +564,21 @@ func (h *Handler) handlePostTool(in Input) Output {
 	// and the transcript — gating it on ToolOutputMode would silently leak it.
 	switch status, redacted := h.checkGuard(in.SessionID, text); status {
 	case guardHit:
-		// REDACT IN PLACE: the model receives the tool output with the secret value(s)
-		// replaced by the placeholder, not a withheld result. The original stays in the
-		// session transcript; only what the model sees is censored.
-		h.Last = Decision{Event: "PostToolUse", Action: "redact", Count: 1}
-		return Output{HookSpecificOutput: &HookSpecificOutput{
-			HookEventName:     "PostToolUse",
-			UpdatedToolOutput: redacted,
-		}}
+		// A confirmed vault value reached this tool output despite the source-side measures
+		// (PreToolUse deny for Read, redact-stream wrap for Bash). BLOCK it rather than try to
+		// redact in place: Claude Code does NOT reliably apply PostToolUse updatedToolOutput
+		// (it is ignored for Read's structured result, and unconfirmed for others), so a
+		// redacted string could silently fail and leak the value. `decision: "block"` is the
+		// CC-sanctioned suppression. We still compute `redacted` to surface a value-free
+		// systemMessage. (For Read this case never fires — the read was denied beforehand.)
+		_ = redacted
+		h.Last = Decision{Event: "PostToolUse", Action: "block", Count: 1}
+		return Output{
+			Decision: "block",
+			Reason:   "secrets-guard: la salida contiene un valor de secreto de la bóveda y se bloqueó (no se puede redactar de forma fiable la salida de una herramienta en esta versión de Claude Code).",
+			SystemMessage: "🛑 secrets-guard bloqueó la salida de la herramienta: contenía un valor de la bóveda. " +
+				"Usa la referencia (keeper://… / op://…) en vez del valor.",
+		}
 	case guardUnavailable:
 		h.Last = Decision{Event: "PostToolUse", Action: "block"}
 		return guardUnavailableBlock("PostToolUse")
@@ -700,6 +725,72 @@ var vaultCLIRe = regexp.MustCompile(`(?i)(?:^|[\s;&|(` + "`" + `])(?:ksm|keeper-
 // resolve a reference to a value (the sandbox path uses `secrets-guard sandbox`, which is
 // not matched).
 var sgResolveRe = regexp.MustCompile(`(?i)\bsecrets-guard\s+(?:read|run)\b`)
+
+// isFileReadTool reports whether a tool returns raw file content to the model as a
+// structured result that PostToolUse cannot rewrite (so a vault value in the file must be
+// blocked at PreToolUse instead of redacted afterwards). The built-in Read is the case.
+func isFileReadTool(name string) bool {
+	return name == "Read"
+}
+
+// maxScanFileSize caps how much of a file the read-guard inspects. Files holding secrets
+// (.env, config, notes) are tiny; the cap only bounds work on pathologically large files.
+const maxScanFileSize = 8 << 20 // 8 MiB
+
+// guardFileRead inspects the file a Read is about to return and, if its content contains a
+// vault value (in any encoding), DENIES the read so the value never reaches the model. It
+// returns (output, true) when it produced a decision, or (zero, false) to let normal
+// processing continue (file unreadable/binary/empty, or no vault value present).
+func (h *Handler) guardFileRead(in Input) (Output, bool) {
+	var m struct {
+		FilePath string `json:"file_path"`
+	}
+	if json.Unmarshal(in.ToolInput, &m) != nil || m.FilePath == "" {
+		return Output{}, false
+	}
+	content, ok := readFileForScan(m.FilePath)
+	if !ok {
+		return Output{}, false // unreadable, binary, empty, or oversized — let Read handle it
+	}
+	switch s, _ := h.checkGuard(in.SessionID, content); s {
+	case guardHit:
+		h.Last = Decision{Event: "PreToolUse", Action: "deny", Count: 1}
+		return Output{HookSpecificOutput: &HookSpecificOutput{
+			HookEventName:      "PreToolUse",
+			PermissionDecision: "deny",
+			PermissionDecisionReason: "secrets-guard: el archivo \"" + m.FilePath + "\" contiene un valor de " +
+				"secreto de la bóveda. Esta versión de Claude Code no permite redactar la salida de Read, así " +
+				"que la lectura se bloquea por seguridad para que el valor no llegue al modelo. Usa la referencia " +
+				"de bóveda (keeper://… / op://…) en vez del valor, o consulta el campo por su referencia.",
+		}}, true
+	case guardUnavailable:
+		h.Last = Decision{Event: "PreToolUse", Action: "deny"}
+		return guardUnavailableBlock("PreToolUse"), true
+	}
+	return Output{}, false // no vault value in the file — allow the read
+}
+
+// readFileForScan returns up to maxScanFileSize bytes of a text file for scanning, or
+// ok=false when the path is unreadable, a directory, empty, or appears to be binary (a NUL
+// byte) — cases where Read would not surface plaintext the guard needs to inspect.
+func readFileForScan(path string) (string, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil || fi.IsDir() {
+		return "", false
+	}
+	b, err := io.ReadAll(io.LimitReader(f, maxScanFileSize))
+	if err != nil || len(b) == 0 {
+		return "", false
+	}
+	if bytes.IndexByte(b, 0) >= 0 {
+		return "", false // binary
+	}
+	return string(b), true
+}
 
 // blockedVaultCLI reports whether cmd invokes a vault CLI (or secrets-guard's resolving
 // subcommands) directly, and the reason to return to the model.
