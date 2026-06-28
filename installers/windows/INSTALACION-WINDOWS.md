@@ -7,10 +7,15 @@ Code. Hay dos caminos: el **automático** (un comando) y el **manual** (paso a p
 **Resumen por usuario** (una vez desplegado el managed-settings, todo SIN admin):
 
 ```powershell
-ksm profile init <ONE-TIME-TOKEN>   # 1. inicializa tu bóveda Keeper
-secrets-guard install               # 2. instala/configura el guard (o se auto-instala al abrir Claude Code)
-secrets-guard doctor                # 3. verifica el estado local
+secrets-guard install   # instala el CLI de Keeper si falta, PIDE tu one-time token,
+                        # inicializa el perfil y VALIDA la conexión — todo interactivo
+secrets-guard doctor    # verifica el estado local
 ```
+
+`secrets-guard install` ahora hace el onboarding completo: detecta/instala el CLI de Keeper
+(winget), te pide el **one-time token** de forma interactiva, ejecuta `ksm profile init` por
+ti y valida que la bóveda responde. Con `require_vault=on` (por defecto), mientras no haya
+bóveda configurada Claude Code **bloquea los prompts** y muestra estos pasos.
 
 Si `secrets-guard` aún no está en el PATH (equipo recién provisionado, antes del primer
 arranque de Claude Code), ábrelo una vez —el plugin instala el CLI solo— o invócalo por ruta
@@ -259,6 +264,7 @@ y el token por los tuyos):
 | `SANDBOX` | `off` | Solo redacción (sin renderizado de referencias). `on` = renderizado en sitio |
 | `PRELOAD_SECRETS` | `auto` | Guard proactivo: carga la bóveda local en caché en memoria y redacta/bloquea cualquier valor en prompts y salidas de herramientas (incl. lecturas de archivos). **`off` lo desactiva**: solo se redactan valores resueltos en la sesión, y un `Read` de un secreto no referenciado queda **sin censurar** |
 | `GUARD_REQUIRED` | `auto` | `auto` cae al detector si la bóveda no está disponible (no brickea). `on` falla cerrado: bloquea prompts/entradas sin verificar **y** la salida de una herramienta si la bóveda está configurada pero no cargó. `off` nunca falla cerrado |
+| `REQUIRE_VAULT` | `on` | Onboarding obligatorio: si NO hay bóveda configurada, bloquea los prompts y muestra los pasos (carpeta compartida → app en Secrets Manager → token → `secrets-guard install`). `off` permite usar sin bóveda (degrada al detector) |
 | `KSM_CONFIG` | base64 (o ausente) | Credencial de Keeper machine-wide para toda la flota; si se omite, cada usuario usa su perfil `ksm`/`keeper-ksm` local |
 
 > `KERNEL_DLP` está **deprecado / no-op** y ya no se incluye en la configuración.

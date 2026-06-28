@@ -32,6 +32,19 @@ func isKeeperBin(name string) bool {
 	return false
 }
 
+// InitKeeperProfile runs `<ksm> profile init -t <token>` to create the local Keeper Secrets
+// Manager profile, letting the CLI store its config in its default location (no --ini-file
+// injection, which matches the behavior that works across versions). Returns the CLI's
+// combined output (status text, never a secret value) and any error.
+func InitKeeperProfile(token string) (string, error) {
+	out, err := vaultCommand(keeperBin(execRunner{}), []string{"profile", "init", "-t", token}).CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+// KeeperCLIName returns the Keeper CLI executable name resolvable on PATH (ksm or
+// keeper-ksm), or "ksm" as a default.
+func KeeperCLIName() string { return keeperBin(execRunner{}) }
+
 // LookKeeper returns the resolved filesystem path of the Keeper CLI (ksm or keeper-ksm)
 // and whether one was found on PATH. Used by command-line diagnostics so they recognize
 // the standalone `keeper-ksm.exe` as well as the pip `ksm` console script.

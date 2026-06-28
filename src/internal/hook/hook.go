@@ -86,20 +86,11 @@ type Config struct {
 	ToolOutputMode      string // redact | block | off
 	CommandReferences   string // inject | keep
 	VaultName           string // active vault: "keeper" | "1password" | "none"
-	// CoworkMode is true on a Cowork host: the agent's tools run in a VM, so the
-	// value is never injected into the command (it would leak to the VM / the host
-	// transcript). References are kept literal, and the canonical
-	// `secrets-guard run --env-file` invocation is rewritten to `cw-run` with the
-	// per-command trust anchor (host public key) + one-time token (via fd), which
-	// fetches the value over the sealed-box disk channel.
+	// CoworkMode is true on a Cowork host (the agent's tools run in a VM). secrets-guard is
+	// INERT in Cowork — it does not inspect, redact, deny, or rewrite anything — so the only
+	// effect of this flag is to short-circuit Handle to a no-op. Cowork value-delivery is out
+	// of scope for now and handled separately.
 	CoworkMode bool
-	// CoworkIsolate wraps the VM child in a user/pid/mount namespace (unshare).
-	CoworkIsolate bool
-	// SandboxMode wraps every Bash command in `secrets-guard sandbox`, which renders
-	// references (env + files under cwd) into real values inside an ephemeral
-	// per-command mount namespace. On a Cowork host this also carries the anchor +
-	// one-time token (CoworkMode). True on Cowork and on a Linux Claude Code host.
-	SandboxMode bool
 	// ShellTools are extra tool names (beyond "Bash" and the built-in MCP shell
 	// pattern) to treat as command-execution tools, from the shell_tools option.
 	ShellTools []string
@@ -116,15 +107,10 @@ type Config struct {
 	// It is true when the vault is loaded (redaction works) or no vault is configured at all
 	// (degrade to the pattern detector, do not block usage).
 	GuardReady bool
-}
-
-// CoworkAnchor mints, per command, the trust anchor for a fetch that will run in
-// the Cowork VM: an exec id, the host Ed25519 public key (base64, delivered on the
-// command line) and a one-time token (delivered to the VM over a file descriptor).
-// The implementation persists {exec id -> token, allowed refs} in a HOST-ONLY
-// directory the daemon reads. ok=false when Cowork host state is unavailable.
-type CoworkAnchor interface {
-	Mint(session string, allowedRefs []string) (execID, hostPubB64, tokenB64 string, ok bool)
+	// RequireVault, when true (the default), BLOCKS a prompt with onboarding instructions when
+	// NO vault is configured at all (VaultName == "none"). Set false (require_vault=off) to
+	// allow use without a vault. It only gates the no-vault onboarding block.
+	RequireVault bool
 }
 
 // Decision is a structured audit record produced by Handle (no secret values).
@@ -142,16 +128,11 @@ type Handler struct {
 	red      *redact.Redactor
 	vault    Resolver
 	cache    SecretCache
-	selfPath string       // absolute path to this binary, used for Bash output wrapping
-	anchor   CoworkAnchor // mints the per-command Cowork trust anchor (nil outside Cowork)
+	selfPath string // absolute path to this binary, used for Bash output wrapping
 
 	// Last holds the audit record of the most recent Handle call.
 	Last Decision
 }
-
-// SetCoworkAnchor installs the Cowork anchor minter (host side). Without it, the
-// Cowork command rewrite falls back to keeping references literal.
-func (h *Handler) SetCoworkAnchor(a CoworkAnchor) { h.anchor = a }
 
 // NewHandler builds a Handler. selfPath is the absolute path to the
 // secrets-guard binary; it is used to wrap Bash commands so their output is
@@ -233,6 +214,14 @@ func guardUnavailableBlock(event string) Output {
 
 // Handle routes an Input to the matching event handler.
 func (h *Handler) Handle(in Input) Output {
+	// secrets-guard operates ONLY in Claude Code (local). In Cowork (the agent's tools run
+	// in a VM) the plugin stays completely INERT — it does not inspect, redact, deny, or
+	// rewrite anything, even if the user installed and enabled it. Cowork value-delivery is
+	// out of scope for now and will be handled separately.
+	if h.cfg.CoworkMode {
+		h.Last = Decision{Event: in.HookEventName, Action: "allow"}
+		return Output{}
+	}
 	switch in.HookEventName {
 	case "UserPromptSubmit":
 		return h.handlePrompt(in)
@@ -263,6 +252,18 @@ func (h *Handler) sessionValues(session string) []string {
 }
 
 func (h *Handler) handlePrompt(in Input) Output {
+	// Onboarding gate: with require_vault on (default) and NO vault configured at all, block
+	// the prompt and tell the user how to set up Keeper. This makes the guard's protection a
+	// precondition for use; set require_vault=off to allow use without a vault.
+	if h.cfg.RequireVault && (h.cfg.VaultName == "" || h.cfg.VaultName == "none") {
+		h.Last = Decision{Event: "UserPromptSubmit", Action: "block"}
+		return Output{
+			Decision:      "block",
+			Reason:        "secrets-guard: no vault configured (require_vault on)",
+			SystemMessage: keeperOnboardingMessage(),
+		}
+	}
+
 	// Core invariant (always on, independent of BlockOnPromptSecret): a prompt must
 	// never carry a real vault secret value into the model's context. With the
 	// proactive guard, every vault value is preloaded into the session cache, so this
@@ -299,6 +300,21 @@ func (h *Handler) handlePrompt(in Input) Output {
 				"ejecutarse, pero el valor nunca llega al contexto del modelo.",
 			strings.Join(cats, ", ")),
 	}
+}
+
+// keeperOnboardingMessage is shown when require_vault is on and no vault is configured. It
+// tells the user exactly how to set Keeper up so `secrets-guard install` can finish.
+func keeperOnboardingMessage() string {
+	return "🛑 secrets-guard: tu bóveda no está configurada, así que el uso está bloqueado hasta " +
+		"completarla (puedes desactivar esto con require_vault=off).\n\n" +
+		"Para habilitarlo con Keeper:\n" +
+		"  1. En Keeper, crea una Carpeta Compartida (Shared Folder).\n" +
+		"  2. En Keeper Secrets Manager, crea una Aplicación y asóciale esa carpeta compartida.\n" +
+		"  3. Genera un token de un solo uso (one-time token) de esa aplicación.\n" +
+		"  4. Ejecuta en una terminal:  secrets-guard install\n" +
+		"     Te pedirá el token de forma interactiva, instalará el CLI de Keeper si falta, " +
+		"inicializará el perfil y validará la conexión.\n" +
+		"  5. Reinicia Claude Code (terminal nueva) y vuelve a intentarlo."
 }
 
 // vaultHint returns guidance naming the active vault's reference syntax, so the
@@ -387,20 +403,19 @@ func (h *Handler) handlePreTool(in Input) Output {
 	// keeps all literal; and commands that resolve references themselves
 	// (op read, ksm secret notation, secrets-guard read, …) keep them literal too.
 	var (
-		resolvedVals []string
-		resolvedRefs []string
-		updated      json.RawMessage
-		changed      bool
+		updated json.RawMessage
+		changed bool
+		refs    []string
+		nInject int
 	)
 	if h.isShellTool(in.ToolName) {
 		var m map[string]any
 		if json.Unmarshal(in.ToolInput, &m) == nil {
 			if cmd, ok := m["command"].(string); ok && cmd != "" {
 				// 1.5) The model must not resolve secrets itself: deny a command that
-				// invokes the vault CLI (ksm/keeper/op) or `secrets-guard read|run`
-				// directly. A direct CLI call would pull plaintext values into the model's
-				// reach, defeating redaction; the model should put the reference in a config
-				// file and let the sandbox render it at execution instead.
+				// invokes the vault CLI (ksm/keeper/op) directly — its output would pull a
+				// plaintext value into the model's reach, defeating redaction. The model
+				// should put the reference in a config/.env and run it via the wrapper.
 				if reason, blocked := blockedVaultCLI(cmd); blocked {
 					h.Last = Decision{Event: "PreToolUse", Action: "deny"}
 					return Output{HookSpecificOutput: &HookSpecificOutput{
@@ -409,37 +424,27 @@ func (h *Handler) handlePreTool(in Input) Output {
 						PermissionDecisionReason: reason,
 					}}
 				}
-				// Sandbox: wrap the WHOLE command in `secrets-guard sandbox`, which
-				// renders vault references — in the environment AND in files under the
-				// working directory — into real values inside an ephemeral per-command
-				// mount namespace, then runs the command. The value never appears in the
-				// command text, the shell, argv, or the transcript. Any command works
-				// (pipes, &&, redirections, multi-line) because the original is passed
-				// as a single quoted `sh -c` argument. On Cowork it also carries the
-				// per-command trust anchor + one-time token.
-				if h.cfg.SandboxMode {
-					if rewritten, ok := h.sandboxWrapCommand(cmd, in.SessionID); ok {
-						m["command"] = rewritten
-						if b, e := json.Marshal(m); e == nil {
-							h.Last = Decision{Event: "PreToolUse", Action: "sandbox"}
-							return Output{HookSpecificOutput: &HookSpecificOutput{
-								HookEventName: "PreToolUse", UpdatedInput: b,
-							}}
-						}
+				// Replace each injectable reference with a ${SG_REF_n} placeholder and wrap
+				// the command in `SG_REF_n='<ref>' secrets-guard run -- sh -c '<cmd>'`, which
+				// resolves the reference and injects the real value ONLY into the child
+				// process environment — never into the command body, argv, the shell, the
+				// transcript, or disk. The value therefore never reaches the model NOR Claude
+				// Code's permission classifier (which evaluates this rewritten command after
+				// the hook); the classifier only ever sees the reference and the placeholder.
+				inner, refPairs, found := h.processBashCommand(cmd)
+				refs = found
+				nInject = len(refPairs)
+				switch {
+				case nInject > 0:
+					m["command"] = h.envInjectWrap(inner, refPairs)
+					if b, e := json.Marshal(m); e == nil {
+						updated, changed = b, true
 					}
-				}
-				newCmd, refs, vals, injErr := h.processBashCommand(cmd)
-				if injErr != nil {
-					h.Last = Decision{Event: "PreToolUse", Action: "deny", Count: 0}
-					return Output{HookSpecificOutput: &HookSpecificOutput{
-						HookEventName:            "PreToolUse",
-						PermissionDecision:       "deny",
-						PermissionDecisionReason: "secrets-guard: no se pudo resolver la referencia de bóveda: " + injErr.Error(),
-					}}
-				}
-				resolvedVals, resolvedRefs = vals, refs
-				if newCmd != cmd {
-					m["command"] = newCmd
+				case inner != cmd:
+					// Only kept-literal occurrences changed the text (e.g. a `\op://…`
+					// opt-out backslash was stripped). Emit the cleaned command verbatim
+					// (no value injected); output redaction still wraps it below.
+					m["command"] = inner
 					if b, e := json.Marshal(m); e == nil {
 						updated, changed = b, true
 					}
@@ -447,40 +452,17 @@ func (h *Handler) handlePreTool(in Input) Output {
 			}
 		}
 	}
-	resolved := len(resolvedVals)
-	if resolved > 0 {
-		// Cache the values in the session daemon (memory only) and record the
-		// references on disk (paths are not secret) so the value can be re-derived
-		// if the daemon is ever unavailable. Both keep it out of later tool I/O.
-		h.cache.Add(in.SessionID, resolvedVals)
-		seen.RecordPaths(in.SessionID, resolvedRefs)
+	// Record the references used (paths are not secret) so a value the command later prints
+	// can be re-derived for output redaction if the in-memory cache is cold.
+	if len(refs) > 0 {
+		seen.RecordPaths(in.SessionID, refs)
 	}
-
-	// In Cowork mode the host does not resolve inline, so populate the Cowork allowlist
-	// with LEAST PRIVILEGE. The ONLY value channel into the VM is
-	// `secrets-guard run --env-file .env`, so the only thing that needs authorizing
-	// is a reference written as a `KEY=op://…` value into an env/dotenv file via the
-	// Write/Edit tool. We deliberately do NOT authorize from:
-	//   - bare Bash commands (a reference is kept literal and never fetched inline,
-	//     so `echo op://victim` must not mint an allowlist entry — confused deputy);
-	//   - arbitrary prose in a *.env file (only real KEY=ref lines count).
-	// This bounds what any rogue/curious VM process can pull to exactly the secrets
-	// the workflow declared in its env files.
-	if h.cfg.CoworkMode && isEnvFileWrite(in.ToolName, in.ToolInput) {
-		if refs := h.envFileRefs(in.ToolInput); len(refs) > 0 {
-			seen.RecordPaths(in.SessionID, refs)
-		}
-	}
-
-	// `injected` is true only when a value actually replaced a reference in the
-	// command body (vs. resolved-internally-but-kept-literal, which still tracks
-	// the value for output redaction but leaves the reference in place).
 	injected := changed
 
-	// 3) For Bash in redact mode, wrap the command so its output is redacted at
-	// the source (PostToolUse output rewriting is not honored by Claude Code).
+	// 3) For Bash in redact mode, wrap the command so its output is redacted at the source
+	// (Claude Code does not honor PostToolUse output rewriting for tool results).
 	wrapped := false
-	if h.isShellTool(in.ToolName) && h.cfg.ToolOutputMode == "redact" && h.selfPath != "" && !h.cfg.CoworkMode && !h.cfg.SandboxMode {
+	if h.isShellTool(in.ToolName) && h.cfg.ToolOutputMode == "redact" && h.selfPath != "" {
 		base := updated
 		if base == nil {
 			base = in.ToolInput
@@ -493,16 +475,9 @@ func (h *Handler) handlePreTool(in Input) Output {
 
 	switch {
 	case injected && wrapped:
-		h.Last = Decision{Event: "PreToolUse", Action: "inject+wrap", Count: resolved}
+		h.Last = Decision{Event: "PreToolUse", Action: "inject+wrap", Count: nInject}
 	case injected:
-		h.Last = Decision{Event: "PreToolUse", Action: "inject", Count: resolved}
-	case resolved > 0 && wrapped:
-		h.Last = Decision{Event: "PreToolUse", Action: "track+wrap", Count: resolved}
-	case resolved > 0:
-		// References resolved internally for output redaction, but kept literal in
-		// the command and no wrap applied — nothing to rewrite.
-		h.Last = Decision{Event: "PreToolUse", Action: "track", Count: resolved}
-		return Output{}
+		h.Last = Decision{Event: "PreToolUse", Action: "inject", Count: nInject}
 	case wrapped:
 		h.Last = Decision{Event: "PreToolUse", Action: "wrap"}
 	default:
@@ -663,56 +638,78 @@ func isVaultResolverCommand(cmd string) bool {
 	return false
 }
 
-// processBashCommand resolves every vault reference in a Bash command INTERNALLY
-// (so each value can be tracked and redacted from the command's output) and
-// returns the references found and the values resolved. Whether a value REPLACES
-// its reference in the returned command is decided per occurrence:
+// processBashCommand rewrites a Bash command so vault references are provisioned via the
+// child ENVIRONMENT rather than injected inline. Each injectable reference is replaced with a
+// ${SG_REF_n} placeholder, and the (name, reference) pairs are returned for the caller to
+// pass to `secrets-guard run`. The decision per occurrence:
 //
 //   - an occurrence escaped with a leading backslash (`\op://…`) is kept literal
 //     (the backslash is stripped on the way out);
 //   - when command_references=keep, or the command itself resolves references
-//     (op read, ksm notation, secrets-guard read/run, …), ALL occurrences are
-//     kept literal;
-//   - otherwise the value is injected.
+//     (op read, ksm notation, secrets-guard read, …), ALL occurrences are kept literal;
+//   - otherwise a ${SG_REF_n} placeholder is emitted.
 //
-// If a value must be injected but fails to resolve, injectErr is returned so the
-// caller can deny the action. References that are kept literal never produce an
-// injectErr even if their internal resolution fails (the command resolves them
-// itself, or the developer asked to keep them).
-func (h *Handler) processBashCommand(cmd string) (newCmd string, refs []string, vals []string, injectErr error) {
+// refs lists every reference seen (for output-redaction tracking). No value is resolved here;
+// resolution happens in `secrets-guard run` at execution time.
+func (h *Handler) processBashCommand(cmd string) (newCmd string, refPairs [][2]string, refs []string) {
 	keepAll := h.cfg.CommandReferences == "keep" || isVaultResolverCommand(cmd)
+	n := 0
 	out := refWithEscapeRe.ReplaceAllStringFunc(cmd, func(match string) string {
 		sub := refWithEscapeRe.FindStringSubmatch(match)
-		escaped, ref := sub[1] == `\`, sub[2]
+		escaped := sub[1] == `\`
+		// Trim a trailing unbalanced ']' (etc.) the greedy regex over-captured but that is
+		// not part of the reference — e.g. `keeper://UID/field/password]` where the ] closes
+		// surrounding shell/markdown, not Keeper [index] notation. The remainder stays literal.
+		ref, rest := splitRefBoundary(sub[2])
 		refs = append(refs, ref)
-
-		if h.cfg.CoworkMode {
-			// Cowork: the tool runs in the VM. NEVER make the value shell-visible —
-			// any value placed in the VM shell (even via $(secrets-guard read …))
-			// can be redirected to the VM's disk (`… > .env`, heredoc, tee). Keep
-			// EVERY reference literal; the value is delivered only through
-			// `secrets-guard run --env-file` (rewritten to `cw-run`), which injects
-			// it into the child process's environment (memory), never into the shell
-			// or a file. The reference is recorded (by the caller) into the allowlist.
-			return ref
-		}
-
-		// Local mode: always resolve internally so the value is tracked for output
-		// redaction, even when the reference is kept literal in the command.
-		resolved, rv, err := h.vault.ResolveString(ref)
-		vals = append(vals, rv...)
 		if escaped || keepAll {
-			return ref // keep literal, stripping any opt-out backslash
+			return ref + rest // keep literal (the backslash opt-out is stripped)
 		}
-		if err != nil {
-			if injectErr == nil {
-				injectErr = err
-			}
-			return ref
-		}
-		return resolved
+		name := fmt.Sprintf("SG_REF_%d", n)
+		n++
+		refPairs = append(refPairs, [2]string{name, ref})
+		// The value is injected into the child env by `secrets-guard run`; the command body
+		// only ever references it as ${SG_REF_n}, so no plaintext lands in the command text.
+		return `"${` + name + `}"` + rest
 	})
-	return out, refs, vals, injectErr
+	return out, refPairs, refs
+}
+
+// splitRefBoundary trims trailing characters the greedy reference regex over-captured but
+// that are not part of the reference: an UNBALANCED ']' (Keeper notation uses balanced
+// [index], so a `]` with no matching `[` is a surrounding delimiter). Returns the clean
+// reference and the trimmed remainder, which the caller keeps literal in the command.
+func splitRefBoundary(ref string) (clean, rest string) {
+	clean = ref
+	for len(clean) > 0 && clean[len(clean)-1] == ']' &&
+		strings.Count(clean, "]") > strings.Count(clean, "[") {
+		clean = clean[:len(clean)-1]
+	}
+	return clean, ref[len(clean):]
+}
+
+// envInjectWrap builds the value-provisioning wrapper for a Bash command that contains vault
+// references. Each reference is passed as an environment assignment SG_REF_n='<ref>' on a
+// `secrets-guard run` invocation, which resolves it and injects the real value into the child
+// process environment; the command body (under `sh -c`) refers to it only as ${SG_REF_n}.
+// The plaintext value therefore never appears in the command text seen by Claude Code's
+// permission classifier, the shell, argv, the transcript, or disk.
+func (h *Handler) envInjectWrap(inner string, refPairs [][2]string) string {
+	self := h.selfPath
+	if self == "" {
+		self = "secrets-guard"
+	}
+	var b strings.Builder
+	for _, p := range refPairs {
+		b.WriteString(p[0])
+		b.WriteByte('=')
+		b.WriteString(shellSingleQuote(p[1]))
+		b.WriteByte(' ')
+	}
+	b.WriteString(shellSingleQuote(self))
+	b.WriteString(" run -- sh -c ")
+	b.WriteString(shellSingleQuote(inner))
+	return b.String()
 }
 
 // vaultCLIRe matches a direct invocation of a vault CLI (Keeper's ksm/keeper-ksm,
@@ -721,10 +718,12 @@ func (h *Handler) processBashCommand(cmd string) (newCmd string, refs []string, 
 // happens inside the sandbox/hook, never in a command whose output reaches the model.
 var vaultCLIRe = regexp.MustCompile(`(?i)(?:^|[\s;&|(` + "`" + `])(?:ksm|keeper-ksm|keeper|op)\s+(?:secret|profile|read|item|inject|get|notation|list|exec|init|run)\b`)
 
-// sgResolveRe matches `secrets-guard read|run`, the CLI subcommands that themselves
-// resolve a reference to a value (the sandbox path uses `secrets-guard sandbox`, which is
-// not matched).
-var sgResolveRe = regexp.MustCompile(`(?i)\bsecrets-guard\s+(?:read|run)\b`)
+// sgResolveRe matches `secrets-guard read`, which prints a resolved value to stdout (the
+// model could redirect it to a file). It is DENIED. `secrets-guard run` is deliberately NOT
+// matched: it injects resolved values only into the child process ENVIRONMENT (never stdout,
+// argv, or the command body) and its output stays under the redaction wrap, so the model may
+// use it to run a tool that needs real values from a .env without ever seeing them.
+var sgResolveRe = regexp.MustCompile(`(?i)\bsecrets-guard\s+read\b`)
 
 // isFileReadTool reports whether a tool returns raw file content to the model as a
 // structured result that PostToolUse cannot rewrite (so a vault value in the file must be
@@ -797,65 +796,13 @@ func readFileForScan(path string) (string, bool) {
 func blockedVaultCLI(cmd string) (string, bool) {
 	if vaultCLIRe.MatchString(cmd) || sgResolveRe.MatchString(cmd) {
 		return "secrets-guard: no ejecutes el CLI de la bóveda (ksm/keeper/op) ni " +
-			"`secrets-guard read|run` directamente — eso traería el valor en texto plano al " +
+			"`secrets-guard read` directamente — eso traería el valor en texto plano al " +
 			"contexto del modelo y rompería la redacción. " +
-			"Usa la referencia (op://… / keeper://…) en un archivo de configuración y deja que " +
-			"el sandbox la renderice al ejecutar el comando.", true
+			"Para que una app consuma valores de un .env sin verlos, usa " +
+			"`secrets-guard run --env-file <archivo> -- <comando>`: resuelve las referencias " +
+			"al ENTORNO del proceso hijo y la salida sigue redactada.", true
 	}
 	return "", false
-}
-
-// sandboxWrapCommand wraps an entire Bash command in `secrets-guard sandbox`, which
-// renders vault references — in the environment AND in matched files under the
-// working directory — into real values inside an ephemeral per-command mount
-// namespace, then runs the original command. The original command is passed as a
-// single quoted `sh -c '<cmd>'` argument, so ANY command works (pipes, &&,
-// redirections, multi-line) and the secret never appears in the command text.
-//
-// On a Cowork host the wrapper also carries the per-command trust anchor (host
-// public key + exec id, via the environment — authoritative over agent argv) and a
-// one-time token on fd 3. On a local Linux host no anchor/token is needed (the
-// sandbox resolves with the local vault).
-func (h *Handler) sandboxWrapCommand(cmd, session string) (string, bool) {
-	inner := "sh -c " + shellSingleQuote(cmd)
-
-	if !h.cfg.CoworkMode {
-		// Local Linux host: the sandbox resolves with the local vault. Pin SG_SESSION
-		// on the sandbox's own command line (inline, not `export`, so the user CMD
-		// cannot clobber it) so the sandbox records the rendered values in this
-		// session's ledger — that is what lets the PostToolUse leak-block withhold a
-		// rendered value if the command prints it. (In Cowork the host daemon records
-		// values independently, so no SG_SESSION is needed there.)
-		return "SG_SESSION=" + shellSingleQuote(session) +
-			" secrets-guard sandbox -- " + inner, true
-	}
-
-	// Cowork: mint the per-command anchor + one-time token.
-	if h.anchor == nil {
-		return "", false
-	}
-	allowed := seen.LoadPaths(session)
-	execID, hostPubB64, tokenB64, ok := h.anchor.Mint(session, allowed)
-	if !ok {
-		return "", false
-	}
-	var b strings.Builder
-	// Non-secret anchor via the ENVIRONMENT (authoritative; agent argv cannot
-	// override an env assignment in the command prefix). The one-time TOKEN stays on
-	// fd 3 only. The redirect binds to the outer `secrets-guard sandbox` command.
-	b.WriteString("SG_CW_HOSTPUB=")
-	b.WriteString(shellSingleQuote(hostPubB64))
-	b.WriteString(" SG_CW_EXECID=")
-	b.WriteString(shellSingleQuote(execID))
-	b.WriteString(" SG_CW_AUTHFD=3")
-	if h.cfg.CoworkIsolate {
-		b.WriteString(" SG_CW_ISOLATE=1")
-	}
-	b.WriteString(" secrets-guard sandbox -- ")
-	b.WriteString(inner)
-	b.WriteString(" 3<<<")
-	b.WriteString(shellSingleQuote(tokenB64))
-	return b.String(), true
 }
 
 func wrapBashCommand(toolInput json.RawMessage, selfPath, session string) (json.RawMessage, bool) {

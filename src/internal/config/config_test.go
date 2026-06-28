@@ -16,14 +16,6 @@ func TestLoad_Defaults(t *testing.T) {
 	if c.ToolOutputMode != "redact" {
 		t.Errorf("ToolOutputMode default = %q, want redact", c.ToolOutputMode)
 	}
-	// The sandbox is OFF by default: the default product behavior is redaction-only
-	// (inspect every prompt and tool I/O), not reference rendering.
-	if c.Sandbox != "off" {
-		t.Errorf("Sandbox default = %q, want off", c.Sandbox)
-	}
-	if c.SandboxWrap(true) {
-		t.Errorf("SandboxWrap should be false by default (sandbox off, not Cowork)")
-	}
 	// The redaction guard is on by default.
 	if !c.PreloadEnabled() {
 		t.Errorf("PreloadEnabled should be true by default")
@@ -31,6 +23,32 @@ func TestLoad_Defaults(t *testing.T) {
 	// Fail-closed policy defaults to auto (fail closed only where the service runs).
 	if c.GuardRequired != "auto" {
 		t.Errorf("GuardRequired default = %q, want auto", c.GuardRequired)
+	}
+	// Onboarding gate defaults to on (block prompts until a vault is configured).
+	if c.RequireVault != "on" {
+		t.Errorf("RequireVault default = %q, want on", c.RequireVault)
+	}
+}
+
+func TestLoad_RequireVault(t *testing.T) {
+	c := Load(func(k string) string {
+		if k == "CLAUDE_PLUGIN_OPTION_REQUIRE_VAULT" {
+			return "off"
+		}
+		return ""
+	})
+	if c.RequireVault != "off" {
+		t.Errorf("RequireVault = %q, want off", c.RequireVault)
+	}
+	// invalid -> default on
+	c = Load(func(k string) string {
+		if k == "CLAUDE_PLUGIN_OPTION_REQUIRE_VAULT" {
+			return "bogus"
+		}
+		return ""
+	})
+	if c.RequireVault != "on" {
+		t.Errorf("invalid RequireVault should fall back to on, got %q", c.RequireVault)
 	}
 }
 
@@ -58,14 +76,6 @@ func TestLoad_GuardRequired(t *testing.T) {
 	}
 }
 
-func TestSandboxWrap_CoworkForcesOnEvenWhenOff(t *testing.T) {
-	c := Load(func(string) string { return "" }) // Sandbox defaults to off
-	c.IsCowork = true
-	if !c.SandboxWrap(false) {
-		t.Errorf("Cowork must force the sandbox on (its only value channel), even with sandbox=off")
-	}
-}
-
 func TestLoad_FromEnv(t *testing.T) {
 	env := map[string]string{
 		"CLAUDE_PLUGIN_OPTION_VAULT_PROVIDER":         "keeper",
@@ -90,40 +100,6 @@ func TestLoad_FromEnv(t *testing.T) {
 	}
 	if c.AuditLogPath != "/tmp/sg-audit.log" {
 		t.Errorf("AuditLogPath = %q", c.AuditLogPath)
-	}
-}
-
-func TestLoad_KernelDLP(t *testing.T) {
-	// Default.
-	c := Load(func(string) string { return "" })
-	if c.KernelDLP != "auto" {
-		t.Errorf("KernelDLP default = %q, want auto", c.KernelDLP)
-	}
-	// Valid override.
-	c = Load(func(k string) string {
-		if k == "CLAUDE_PLUGIN_OPTION_KERNEL_DLP" {
-			return "require"
-		}
-		if k == "CLAUDE_PLUGIN_OPTION_DLP_INSTALL_SOURCE" {
-			return "https://mirror.internal/sandbox-dlp"
-		}
-		return ""
-	})
-	if c.KernelDLP != "require" {
-		t.Errorf("KernelDLP = %q, want require", c.KernelDLP)
-	}
-	if c.DLPInstallSource != "https://mirror.internal/sandbox-dlp" {
-		t.Errorf("DLPInstallSource = %q", c.DLPInstallSource)
-	}
-	// Invalid enum falls back to default.
-	c = Load(func(k string) string {
-		if k == "CLAUDE_PLUGIN_OPTION_KERNEL_DLP" {
-			return "bogus"
-		}
-		return ""
-	})
-	if c.KernelDLP != "auto" {
-		t.Errorf("invalid KernelDLP should fall back to auto, got %q", c.KernelDLP)
 	}
 }
 

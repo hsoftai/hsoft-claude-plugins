@@ -233,9 +233,14 @@ func TestPreToolUse_DeniesPlaintextSecret(t *testing.T) {
 	}
 }
 
+// A vault reference in a Bash command is provisioned via the ENVIRONMENT, not injected into
+// the command body: the reference becomes an SG_REF_n='<ref>' assignment on a
+// `secrets-guard run` wrapper and the command body refers to it as ${SG_REF_n}. The real
+// value NEVER appears in the rewritten command (so neither the model nor Claude Code's
+// permission classifier can see it).
 func TestPreToolUse_ResolvesVaultReference(t *testing.T) {
 	cfg := defaultCfg()
-	cfg.ToolOutputMode = "off" // isolate injection from output wrapping
+	cfg.ToolOutputMode = "off" // isolate env-injection from output wrapping
 	h := newHandler(cfg)
 	out := h.Handle(Input{
 		HookEventName: "PreToolUse",
@@ -243,7 +248,7 @@ func TestPreToolUse_ResolvesVaultReference(t *testing.T) {
 		ToolInput:     json.RawMessage(`{"command":"export DB=op://vault/db/password"}`),
 	})
 	if out.HookSpecificOutput == nil || len(out.HookSpecificOutput.UpdatedInput) == 0 {
-		t.Fatalf("expected updatedInput with resolved value, got %+v", out.HookSpecificOutput)
+		t.Fatalf("expected updatedInput with env-injection wrapper, got %+v", out.HookSpecificOutput)
 	}
 	var ti struct {
 		Command string `json:"command"`
@@ -251,11 +256,20 @@ func TestPreToolUse_ResolvesVaultReference(t *testing.T) {
 	if err := json.Unmarshal(out.HookSpecificOutput.UpdatedInput, &ti); err != nil {
 		t.Fatalf("updatedInput not valid: %v", err)
 	}
-	if !strings.Contains(ti.Command, "RESOLVED_SECRET") {
-		t.Fatalf("reference not resolved: %q", ti.Command)
+	// The value must NEVER be in the command body.
+	if strings.Contains(ti.Command, "RESOLVED_SECRET") {
+		t.Fatalf("the plaintext value must NOT appear in the command: %q", ti.Command)
 	}
-	if strings.Contains(ti.Command, "op://") {
-		t.Fatalf("reference should be gone: %q", ti.Command)
+	// The reference is carried as an env assignment for `secrets-guard run` to resolve.
+	if !strings.Contains(ti.Command, "SG_REF_0='op://vault/db/password'") {
+		t.Fatalf("reference not carried as an env assignment: %q", ti.Command)
+	}
+	if !strings.Contains(ti.Command, "run -- sh -c ") {
+		t.Fatalf("command not wrapped in `secrets-guard run`: %q", ti.Command)
+	}
+	// The command body references the value only by placeholder.
+	if !strings.Contains(ti.Command, "${SG_REF_0}") {
+		t.Fatalf("command body should use the ${SG_REF_0} placeholder: %q", ti.Command)
 	}
 }
 
@@ -293,6 +307,71 @@ func TestPreToolUse_VaultCLIListDenied(t *testing.T) {
 	}
 }
 
+// A2: the greedy reference regex must not swallow a trailing unbalanced ']' (a shell/markdown
+// delimiter, not Keeper [index] notation). The clean reference is env-injected and the ']'
+// stays literal in the command. Balanced [index] notation is preserved.
+func TestSplitRefBoundary(t *testing.T) {
+	cases := []struct{ in, clean, rest string }{
+		{"keeper://UID/field/password]", "keeper://UID/field/password", "]"},
+		{"op://v/i/p]]", "op://v/i/p", "]]"},
+		{"keeper://UID/field/name[1]", "keeper://UID/field/name[1]", ""}, // balanced, kept
+		{"op://v/i/p", "op://v/i/p", ""},
+	}
+	for _, c := range cases {
+		clean, rest := splitRefBoundary(c.in)
+		if clean != c.clean || rest != c.rest {
+			t.Errorf("splitRefBoundary(%q) = (%q,%q), want (%q,%q)", c.in, clean, rest, c.clean, c.rest)
+		}
+	}
+}
+
+// End-to-end: a command with `keeper://…/password]` env-injects the CLEAN reference and keeps
+// the ']' literal — no "field 'password]'" parse error, no value in the command.
+func TestPreToolUse_RefTrailingBracketNotSwallowed(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.ToolOutputMode = "off"
+	h := newHandler(cfg)
+	out := h.Handle(Input{
+		HookEventName: "PreToolUse", ToolName: "Bash",
+		ToolInput: json.RawMessage(`{"command":"echo [pw=keeper://UID/field/password]"}`),
+	})
+	if out.HookSpecificOutput == nil || len(out.HookSpecificOutput.UpdatedInput) == 0 {
+		t.Fatalf("expected env-injection rewrite, got %+v", out)
+	}
+	var ti struct{ Command string `json:"command"` }
+	_ = json.Unmarshal(out.HookSpecificOutput.UpdatedInput, &ti)
+	if !strings.Contains(ti.Command, "SG_REF_0='keeper://UID/field/password'") {
+		t.Fatalf("clean reference (no trailing ]) must be the env assignment: %q", ti.Command)
+	}
+	if !strings.Contains(ti.Command, `${SG_REF_0}"]`) {
+		t.Fatalf("the ']' must stay literal right after the placeholder: %q", ti.Command)
+	}
+	if strings.Contains(ti.Command, "password]'") {
+		t.Fatalf("the ']' must NOT be part of the reference: %q", ti.Command)
+	}
+}
+
+// `secrets-guard read` prints a value to stdout → DENIED. But `secrets-guard run` injects
+// values only into the child env (output stays redacted) → ALLOWED, so the model has a safe
+// way to run an app that needs real values from a .env.
+func TestPreToolUse_SgReadDeniedRunAllowed(t *testing.T) {
+	h := newHandler(defaultCfg())
+	read := h.Handle(Input{
+		HookEventName: "PreToolUse", ToolName: "Bash",
+		ToolInput: json.RawMessage(`{"command":"secrets-guard read op://v/i/password"}`),
+	})
+	if read.HookSpecificOutput == nil || read.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("`secrets-guard read` must be denied, got %+v", read)
+	}
+	run := h.Handle(Input{
+		HookEventName: "PreToolUse", ToolName: "Bash",
+		ToolInput: json.RawMessage(`{"command":"secrets-guard run --env-file .env -- node app.js"}`),
+	})
+	if run.HookSpecificOutput != nil && run.HookSpecificOutput.PermissionDecision == "deny" {
+		t.Fatalf("`secrets-guard run` must be ALLOWED, got %+v", run)
+	}
+}
+
 // A backslash escapes a single occurrence: the value is not injected, the
 // reference is kept (without the backslash), and it is still tracked.
 func TestPreToolUse_BackslashEscapeKeepsReference(t *testing.T) {
@@ -324,8 +403,45 @@ func TestPreToolUse_BackslashEscapeKeepsReference(t *testing.T) {
 	}
 }
 
-// command_references=keep makes every occurrence stay literal while still being
-// tracked for output redaction.
+// Mixed case: an UNescaped reference is env-injected (${SG_REF_0}) while a \-escaped one in
+// the same command stays literal (backslash stripped, no env var, no value). This verifies
+// the escape is honored per-occurrence by the env-injection rewrite.
+func TestPreToolUse_MixedEscapedAndInjected(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.ToolOutputMode = "off"
+	h := newHandler(cfg)
+	out := h.Handle(Input{
+		HookEventName: "PreToolUse", ToolName: "Bash",
+		// first ref injectable, second ref escaped with a leading backslash
+		ToolInput: json.RawMessage(`{"command":"echo op://v/i/aaa and \\op://v/i/bbb"}`),
+	})
+	if out.HookSpecificOutput == nil || len(out.HookSpecificOutput.UpdatedInput) == 0 {
+		t.Fatalf("expected rewrite, got %+v", out)
+	}
+	var ti struct{ Command string `json:"command"` }
+	_ = json.Unmarshal(out.HookSpecificOutput.UpdatedInput, &ti)
+	if strings.Contains(ti.Command, "RESOLVED_SECRET") {
+		t.Fatalf("no value must appear: %q", ti.Command)
+	}
+	// The unescaped ref is provisioned via env.
+	if !strings.Contains(ti.Command, "SG_REF_0='op://v/i/aaa'") || !strings.Contains(ti.Command, "${SG_REF_0}") {
+		t.Fatalf("unescaped ref must be env-injected: %q", ti.Command)
+	}
+	// The escaped ref stays literal (backslash stripped) and is NOT env-injected.
+	if !strings.Contains(ti.Command, "op://v/i/bbb") {
+		t.Fatalf("escaped ref must remain literal: %q", ti.Command)
+	}
+	if strings.Contains(ti.Command, `\op://`) {
+		t.Fatalf("opt-out backslash must be stripped: %q", ti.Command)
+	}
+	// The escaped ref must NOT become an env assignment (only the unescaped one did).
+	if strings.Contains(ti.Command, "SG_REF_1") || strings.Contains(ti.Command, "SG_REF_0='op://v/i/bbb'") {
+		t.Fatalf("escaped ref must NOT be turned into an env var: %q", ti.Command)
+	}
+}
+
+// command_references=keep makes every occurrence stay literal (no env-injection wrapper):
+// the command is left untouched and the reference is recorded for output redaction.
 func TestPreToolUse_CommandReferencesKeep(t *testing.T) {
 	cfg := defaultCfg()
 	cfg.ToolOutputMode = "off"
@@ -339,42 +455,41 @@ func TestPreToolUse_CommandReferencesKeep(t *testing.T) {
 	if out.HookSpecificOutput != nil && len(out.HookSpecificOutput.UpdatedInput) > 0 {
 		t.Fatalf("keep mode must not rewrite the command, got %+v", out.HookSpecificOutput)
 	}
-	if h.Last.Action != "track" {
-		t.Fatalf("expected action=track, got %q", h.Last.Action)
+	if h.Last.Action != "allow" {
+		t.Fatalf("expected action=allow (kept literal, output mode off), got %q", h.Last.Action)
 	}
 }
 
-// CTF-2 regression: in Cowork mode the value must NEVER become shell-visible in
-// the VM — no injection AND no `$(secrets-guard read …)` rewrite (which, inside a
-// heredoc/redirect, would land the value on the VM's disk). The reference is kept
-// literal; the command is not wrapped. The only value channel is `secrets-guard
-// run --env-file` (injects into the child env, never the shell or a file).
-func TestPreToolUse_CoworkModeKeepsReferenceLiteral(t *testing.T) {
+// secrets-guard is INERT in Cowork: it operates only in Claude Code (local). Even with a
+// known vault value present and the plugin enabled, every event in Cowork mode is a
+// pass-through no-op (no deny, no block, no redact, no rewrite). Cowork value-delivery is
+// out of scope for now.
+func TestCoworkMode_PluginIsInert(t *testing.T) {
 	cfg := defaultCfg()
 	cfg.CoworkMode = true
-	h := newHandler(cfg)
-	out := h.Handle(Input{
-		HookEventName: "PreToolUse",
-		ToolName:      "Bash",
-		ToolInput:     json.RawMessage(`{"command":"cat > .env <<EOF\nDB=op://v/i/token\nEOF"}`),
-	})
-	// No rewrite at all: the command is unchanged (or carries no UpdatedInput).
-	if out.HookSpecificOutput != nil && len(out.HookSpecificOutput.UpdatedInput) > 0 {
-		var ti struct {
-			Command string `json:"command"`
-		}
-		_ = json.Unmarshal(out.HookSpecificOutput.UpdatedInput, &ti)
-		if strings.Contains(ti.Command, "secrets-guard read") {
-			t.Fatalf("Cowork mode must NOT rewrite to a shell-visible read (disk-leak): %q", ti.Command)
-		}
-		if strings.Contains(ti.Command, "RESOLVED_SECRET") {
-			t.Fatalf("value must NOT be injected in Cowork mode: %q", ti.Command)
-		}
+	cfg.RequireVault = true // onboarding gate ON ...
+	cfg.VaultName = "none"  // ... and NO vault: in Claude Code this would block; in Cowork it must NOT.
+	eng := detect.New()
+	h := NewHandler(cfg, eng, redact.New(eng), fakeResolver{value: "RESOLVED_SECRET"}, knownCache{}, "/opt/sg/bin/secrets-guard")
+
+	// The onboarding gate must NOT fire in Cowork (the whole hook is inert there).
+	if out := h.Handle(Input{HookEventName: "UserPromptSubmit", Prompt: "do something"}); out.Decision == "block" || out.HookSpecificOutput != nil {
+		t.Fatalf("Cowork: onboarding gate must NOT block, got %+v", out)
+	}
+	// A prompt carrying a known secret value — must NOT be blocked in Cowork.
+	if out := h.Handle(Input{HookEventName: "UserPromptSubmit", Prompt: "the value is RESOLVED_SECRET"}); out.Decision == "block" || out.HookSpecificOutput != nil {
+		t.Fatalf("Cowork: prompt must be inert, got %+v", out)
+	}
+	// A Bash command with a reference — must NOT be rewritten/denied.
+	if out := h.Handle(Input{HookEventName: "PreToolUse", ToolName: "Bash", ToolInput: json.RawMessage(`{"command":"app --pw keeper://U/field/password"}`)}); out.Decision == "block" || out.HookSpecificOutput != nil {
+		t.Fatalf("Cowork: PreToolUse must be inert, got %+v", out)
+	}
+	// A tool output leaking a known value — must NOT be blocked/redacted.
+	if out := h.Handle(Input{HookEventName: "PostToolUse", ToolName: "Bash", SessionID: "s1", ToolResponse: json.RawMessage(`"leaked RESOLVED_SECRET"`)}); out.Decision == "block" || out.HookSpecificOutput != nil {
+		t.Fatalf("Cowork: PostToolUse must be inert, got %+v", out)
 	}
 }
 
-// In Cowork mode there is no Bash output wrap, so PostToolUse must block Bash
-// output that leaks a known resolved value.
 // censored reports whether a secret never reaches the model in a PostToolUse result: the
 // output was either withheld (block) or rewritten with the value redacted out
 // (updatedToolOutput present and not containing the secret).
@@ -384,77 +499,6 @@ func censored(out Output, secret string) bool {
 	}
 	o := out.HookSpecificOutput
 	return o != nil && o.UpdatedToolOutput != "" && !strings.Contains(o.UpdatedToolOutput, secret)
-}
-
-func TestPostToolUse_CoworkModeBlocksBashLeak(t *testing.T) {
-	cfg := defaultCfg()
-	cfg.CoworkMode = true
-	eng := detect.New()
-	// A resolver/cache that reports the value as known so the leak is detected.
-	h := NewHandler(cfg, eng, redact.New(eng), fakeResolver{value: "RESOLVED_SECRET"}, knownCache{}, "/opt/sg/bin/secrets-guard")
-	out := h.Handle(Input{
-		HookEventName: "PostToolUse",
-		ToolName:      "Bash",
-		SessionID:     "s1",
-		ToolResponse:  json.RawMessage(`"the value is RESOLVED_SECRET oops"`),
-	})
-	if !censored(out, "RESOLVED_SECRET") {
-		t.Fatalf("Cowork-mode Bash leak must be censored, got %+v", out)
-	}
-}
-
-// CTF-1 regression: in Cowork mode a reference that merely appears as text in an
-// arbitrary file (NOTES.md) must NOT be authorized into the Cowork allowlist
-// (confused-deputy exfiltration). Only executed Bash commands and env-file writes
-// authorize references.
-func TestPreToolUse_CoworkAllowlistLeastPrivilege(t *testing.T) {
-	skipLedgerOnWindows(t)
-	cfg := defaultCfg()
-	cfg.CoworkMode = true
-	sess := "ctf1-" + t.Name()
-
-	loaded := func() []string { return seen.LoadPaths(sess) }
-	contains := func(want string) bool {
-		for _, p := range loaded() {
-			if p == want {
-				return true
-			}
-		}
-		return false
-	}
-
-	h := newHandler(cfg)
-	pre := func(tool, input string) {
-		h.Handle(Input{HookEventName: "PreToolUse", ToolName: tool, SessionID: sess, ToolInput: json.RawMessage(input)})
-	}
-
-	// (a) Arbitrary file content with a reference → NOT authorized.
-	pre("Write", `{"file_path":"NOTES.md","content":"key: op://Prod/root-ca/private_key"}`)
-	if contains("op://Prod/root-ca/private_key") {
-		t.Fatal("arbitrary file content must NOT authorize a reference (confused deputy)")
-	}
-
-	// (b) A real KEY=ref line in a .env file (Write) → authorized.
-	pre("Write", `{"file_path":"config/.env","content":"DB=op://Prod/db/password"}`)
-	if !contains("op://Prod/db/password") {
-		t.Fatal("a KEY=ref env-file line should authorize its reference")
-	}
-
-	// (c) CTF-3: a reference merely mentioned in a Bash command → NOT authorized
-	// (bare commands keep refs literal and never fetch them inline).
-	pre("Bash", `{"command":"echo 'see op://Prod/api/token for later'"}`)
-	if contains("op://Prod/api/token") {
-		t.Fatal("a reference in a Bash command must NOT authorize it (self-minted allowlist)")
-	}
-
-	// (d) CTF-3: a reference as PROSE inside a *.env file → NOT authorized
-	// (only KEY=ref lines count, not arbitrary content).
-	pre("Write", `{"file_path":"x.env","content":"# please fetch op://Prod/ssh/key thanks"}`)
-	if contains("op://Prod/ssh/key") {
-		t.Fatal("prose in a .env file must NOT authorize a reference")
-	}
-
-	seen.Clear(sess)
 }
 
 func TestPreToolUse_AllowsCleanCommand(t *testing.T) {
@@ -499,29 +543,6 @@ func TestPreToolUse_WrapsBashOutputInRedactMode(t *testing.T) {
 	// SG_SESSION`). Expect `SG_SESSION='…' '<self>' redact-stream`.
 	if !strings.Contains(ti.Command, "SG_SESSION='s1' '/opt/sg/bin/secrets-guard' redact-stream") {
 		t.Fatalf("redact-stream not pinned to an inline SG_SESSION: %q", ti.Command)
-	}
-}
-
-// CTF-12 verification: the Cowork-mode backstop works through the REAL seen
-// ledger (not the knownCache stub). On the host, the host's OnResolve records
-// the resolved reference in seen; PostToolUse re-derives the value via the vault
-// (host has the CLI) and blocks the echoed value. noopCache forces the seen
-// fallback path.
-func TestPostToolUse_CoworkBackstopViaSeenLedger(t *testing.T) {
-	skipLedgerOnWindows(t)
-	cfg := defaultCfg()
-	cfg.CoworkMode = true
-	h := newHandler(cfg) // fakeResolver resolves any ref to RESOLVED_SECRET; noopCache
-	sess := "ctf12-" + t.Name()
-	seen.RecordPaths(sess, []string{"op://Prod/db/password"}) // what the host OnResolve records
-	defer seen.Clear(sess)
-
-	out := h.Handle(Input{
-		HookEventName: "PostToolUse", ToolName: "Bash", SessionID: sess,
-		ToolResponse: json.RawMessage(`"the child echoed RESOLVED_SECRET to stdout"`),
-	})
-	if out.Decision != "block" {
-		t.Fatalf("host PostToolUse must block a value re-derivable from the seen ledger, got %+v", out)
 	}
 }
 
@@ -643,6 +664,45 @@ func TestPostToolUse_PassthroughCleanOutput(t *testing.T) {
 // policy: with guard_required=on (RequireGuard), a vault IS configured (VaultName set) but its
 // values never loaded (GuardReady false), so the guard cannot prove the output is secret-free.
 // Even a seemingly clean output must be blocked rather than risk leaking a vault secret.
+// require_vault on + NO vault configured -> the prompt is BLOCKED with onboarding steps.
+func TestUserPromptSubmit_RequireVaultBlocksWhenNoVault(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.RequireVault = true
+	cfg.VaultName = "none"
+	h := newHandler(cfg)
+	out := h.Handle(Input{HookEventName: "UserPromptSubmit", Prompt: "refactor the auth module"})
+	if out.Decision != "block" {
+		t.Fatalf("require_vault on + no vault must block the prompt, got %+v", out)
+	}
+	if !strings.Contains(out.SystemMessage, "Shared Folder") || !strings.Contains(out.SystemMessage, "secrets-guard install") {
+		t.Fatalf("block must show Keeper onboarding steps, got %q", out.SystemMessage)
+	}
+}
+
+// require_vault off -> use is allowed even without a vault (degrade).
+func TestUserPromptSubmit_RequireVaultOffAllows(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.RequireVault = false
+	cfg.VaultName = "none"
+	h := newHandler(cfg)
+	out := h.Handle(Input{HookEventName: "UserPromptSubmit", Prompt: "refactor the auth module"})
+	if out.Decision == "block" {
+		t.Fatalf("require_vault off must allow use without a vault, got %+v", out)
+	}
+}
+
+// require_vault on but a vault IS configured -> onboarding does not fire.
+func TestUserPromptSubmit_RequireVaultWithVaultAllows(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.RequireVault = true
+	cfg.VaultName = "keeper"
+	h := newHandler(cfg)
+	out := h.Handle(Input{HookEventName: "UserPromptSubmit", Prompt: "refactor the auth module"})
+	if out.Decision == "block" {
+		t.Fatalf("a configured vault must not trigger onboarding block, got %+v", out)
+	}
+}
+
 // readInput builds a Read PreToolUse input with a JSON-safe file_path (Windows backslashes).
 func readInput(path string) json.RawMessage {
 	b, _ := json.Marshal(map[string]string{"file_path": path})
@@ -788,15 +848,13 @@ func TestPostToolUse_OffMode(t *testing.T) {
 	}
 }
 
-// CTF-8 round 8: `tool_output_mode=off` disables the HEURISTIC detector scan, but
-// it must NOT disable the resolved-value backstop. In sandbox mode the inline
-// redact-stream wrap is off, so this backstop is the ONLY guard between a vault
-// value the sandbox rendered this session and the model. A `cat .env` / `printenv`
-// that echoes the rendered secret must still be blocked even with output mode off.
+// `tool_output_mode=off` disables the HEURISTIC detector scan, but it must NOT disable the
+// known-vault-value backstop: a Bash output that echoes a value secrets-guard resolved this
+// session (e.g. `printenv` after `secrets-guard run`) must still be blocked even with the
+// output mode off.
 func TestPostToolUse_OffModeStillBlocksResolvedValueLeak(t *testing.T) {
 	cfg := defaultCfg()
 	cfg.ToolOutputMode = "off"
-	cfg.SandboxMode = true // Linux/Cowork host: no inline output wrap
 	eng := detect.New()
 	// knownCache reports RESOLVED_SECRET as a value resolved this session.
 	h := NewHandler(cfg, eng, redact.New(eng), fakeResolver{value: "RESOLVED_SECRET"}, knownCache{}, "/opt/sg/bin/secrets-guard")
@@ -804,124 +862,10 @@ func TestPostToolUse_OffModeStillBlocksResolvedValueLeak(t *testing.T) {
 		HookEventName: "PostToolUse",
 		ToolName:      "Bash",
 		SessionID:     "s1",
-		ToolResponse:  json.RawMessage(`"the sandbox rendered RESOLVED_SECRET and the command printed it"`),
+		ToolResponse:  json.RawMessage(`"the command printed RESOLVED_SECRET to stdout"`),
 	})
 	if !censored(out, "RESOLVED_SECRET") {
 		t.Fatalf("off mode must still censor a value secrets-guard resolved this session, got %+v", out)
-	}
-}
-
-// --- Sandbox (env + file rendering) ---
-
-type fakeAnchor struct{}
-
-func (fakeAnchor) Mint(string, []string) (string, string, string, bool) {
-	return "execID123", "SG9zdFB1Yg==", "dG9rZW4=", true
-}
-
-func coworkSandboxCfg() Config {
-	cfg := defaultCfg()
-	cfg.CoworkMode = true
-	cfg.SandboxMode = true
-	return cfg
-}
-
-// On a Cowork host, a command is wrapped in `secrets-guard sandbox -- sh -c '<cmd>'`
-// with the anchor in the env prefix and the one-time token on fd 3 — never the value.
-func TestPreToolUse_SandboxWrapsCowork(t *testing.T) {
-	h := newHandler(coworkSandboxCfg())
-	h.SetCoworkAnchor(fakeAnchor{})
-	out := h.Handle(Input{
-		HookEventName: "PreToolUse", ToolName: "Bash", SessionID: "s1",
-		ToolInput: json.RawMessage(`{"command":"npm start"}`),
-	})
-	if out.HookSpecificOutput == nil || out.HookSpecificOutput.UpdatedInput == nil {
-		t.Fatalf("expected sandbox wrap, got %+v", out)
-	}
-	var m map[string]any
-	_ = json.Unmarshal(out.HookSpecificOutput.UpdatedInput, &m)
-	cmd, _ := m["command"].(string)
-	for _, want := range []string{
-		"SG_CW_HOSTPUB='SG9zdFB1Yg=='", "SG_CW_EXECID='execID123'", "SG_CW_AUTHFD=3",
-		"secrets-guard sandbox -- sh -c 'npm start'", "3<<<'dG9rZW4='",
-	} {
-		if !strings.Contains(cmd, want) {
-			t.Fatalf("wrapped command missing %q:\n%s", want, cmd)
-		}
-	}
-	if strings.Contains(cmd, "--host-pub") || strings.Contains(cmd, "--auth-fd") {
-		t.Fatalf("anchor must be in the env prefix, not argv: %s", cmd)
-	}
-	if strings.Contains(cmd, "RESOLVED_SECRET") {
-		t.Fatalf("the value must NEVER appear in the command: %s", cmd)
-	}
-}
-
-// ANY command is wrapped now — compound, piped, redirected, multi-line — because the
-// original is a single quoted `sh -c` argument (no fragile single-command guard).
-func TestPreToolUse_SandboxWrapsAnyCommand(t *testing.T) {
-	h := newHandler(coworkSandboxCfg())
-	h.SetCoworkAnchor(fakeAnchor{})
-	for _, cmd := range []string{
-		"cd app && npm start 2>&1",
-		"cat .env | grep TOKEN",
-		"node -e 'require(\"dotenv\").config(); console.log(process.env.DB)'",
-		"a; b; c",
-	} {
-		out := h.Handle(Input{
-			HookEventName: "PreToolUse", ToolName: "Bash", SessionID: "s1",
-			ToolInput: json.RawMessage(`{"command":` + jsonStr(cmd) + `}`),
-		})
-		if out.HookSpecificOutput == nil || out.HookSpecificOutput.UpdatedInput == nil {
-			t.Fatalf("command %q must be wrapped, got %+v", cmd, out)
-		}
-		var m map[string]any
-		_ = json.Unmarshal(out.HookSpecificOutput.UpdatedInput, &m)
-		got, _ := m["command"].(string)
-		if !strings.Contains(got, "secrets-guard sandbox -- sh -c ") || !strings.Contains(got, "3<<<'dG9rZW4='") {
-			t.Fatalf("command %q not wrapped correctly:\n%s", cmd, got)
-		}
-	}
-}
-
-// A bare command carrying a reference keeps it literal — the value is rendered into
-// env/files by the sandbox at runtime, never injected into the command text.
-func TestPreToolUse_SandboxKeepsRefLiteral(t *testing.T) {
-	h := newHandler(coworkSandboxCfg())
-	h.SetCoworkAnchor(fakeAnchor{})
-	out := h.Handle(Input{
-		HookEventName: "PreToolUse", ToolName: "Bash", SessionID: "s1",
-		ToolInput: json.RawMessage(`{"command":"echo op://v/i/p"}`),
-	})
-	var m map[string]any
-	_ = json.Unmarshal(out.HookSpecificOutput.UpdatedInput, &m)
-	cmd, _ := m["command"].(string)
-	if !strings.Contains(cmd, "sh -c 'echo op://v/i/p'") {
-		t.Fatalf("reference must stay literal inside sh -c: %s", cmd)
-	}
-	if strings.Contains(cmd, "RESOLVED_SECRET") {
-		t.Fatalf("value leaked into the command: %s", cmd)
-	}
-}
-
-// On a Linux Claude Code host (sandbox but not Cowork) the wrap carries no anchor or
-// token (it resolves with the local vault).
-func TestPreToolUse_SandboxLocalNoAnchor(t *testing.T) {
-	cfg := defaultCfg()
-	cfg.SandboxMode = true // CoworkMode stays false
-	h := newHandler(cfg)
-	out := h.Handle(Input{
-		HookEventName: "PreToolUse", ToolName: "Bash", SessionID: "s1",
-		ToolInput: json.RawMessage(`{"command":"npm start"}`),
-	})
-	if out.HookSpecificOutput == nil || out.HookSpecificOutput.UpdatedInput == nil {
-		t.Fatalf("expected sandbox wrap, got %+v", out)
-	}
-	var m map[string]any
-	_ = json.Unmarshal(out.HookSpecificOutput.UpdatedInput, &m)
-	cmd, _ := m["command"].(string)
-	if cmd != "SG_SESSION='s1' secrets-guard sandbox -- sh -c 'npm start'" {
-		t.Fatalf("local sandbox wrap must pin SG_SESSION and carry no anchor/token: %q", cmd)
 	}
 }
 
@@ -951,24 +895,6 @@ func TestIsShellTool(t *testing.T) {
 	h2 := newHandler(cfg)
 	if !h2.isShellTool("mcp__custom__exec") {
 		t.Fatal("shell_tools config entry should match")
-	}
-}
-
-// The Cowork MCP shell tool (mcp__workspace__bash) must be wrapped just like Bash.
-func TestPreToolUse_McpBashIsWrapped(t *testing.T) {
-	h := newHandler(coworkSandboxCfg())
-	h.SetCoworkAnchor(fakeAnchor{})
-	out := h.Handle(Input{
-		HookEventName: "PreToolUse", ToolName: "mcp__workspace__bash", SessionID: "s1",
-		ToolInput: json.RawMessage(`{"command":"cat .env"}`),
-	})
-	if out.HookSpecificOutput == nil || out.HookSpecificOutput.UpdatedInput == nil {
-		t.Fatalf("mcp__workspace__bash must be wrapped, got %+v", out)
-	}
-	var m map[string]any
-	_ = json.Unmarshal(out.HookSpecificOutput.UpdatedInput, &m)
-	if cmd, _ := m["command"].(string); !strings.Contains(cmd, "secrets-guard sandbox -- sh -c 'cat .env'") {
-		t.Fatalf("not wrapped: %s", cmd)
 	}
 }
 

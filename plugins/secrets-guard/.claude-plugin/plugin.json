@@ -1,7 +1,7 @@
 {
   "name": "secrets-guard",
   "displayName": "secrets-guard",
-  "version": "0.7.4",
+  "version": "0.8.0",
   "description": "Keep secrets out of the model: block plaintext secrets in prompts, resolve vault references (Keeper/1Password) into tool input, and redact secrets leaked in tool output.",
   "author": {
     "name": "Humphrey Consulting Group"
@@ -49,7 +49,7 @@
     "command_references": {
       "type": "string",
       "title": "Command references",
-      "description": "Whether to replace vault references with their value in Bash command bodies: 'inject' (default) injects the value, 'keep' leaves every reference literal. Either way, references are always resolved internally so the output is redacted; commands that resolve references themselves (op read, ksm notation, secrets-guard read/run) always keep them literal, and a single occurrence can opt out with a leading backslash (\\op://...).",
+      "description": "How vault references in a Bash command are handled: 'inject' (default) replaces each reference with a ${SG_REF_n} placeholder and provisions the real value into the child process ENVIRONMENT via `secrets-guard run` — the value never enters the command text, argv, the shell, the transcript, or disk (so neither the model nor Claude Code's permission classifier sees it). 'keep' leaves every reference literal. Commands that resolve references themselves (op read, ksm notation, secrets-guard read) always keep them literal, and a single occurrence can opt out with a leading backslash (\\op://...).",
       "default": "inject"
     },
     "custom_patterns_path": {
@@ -94,12 +94,6 @@
       "description": "'audit' (default) resolves any reference the per-command one-time-token-authenticated request asks for and logs each; 'enforce' resolves only references the host observed being written this session (stricter, but breaks transparent rendering of references the host never saw).",
       "default": "audit"
     },
-    "sandbox": {
-      "type": "string",
-      "title": "Secret-rendering sandbox",
-      "description": "Render vault references into real values — in the environment, in files under the working directory, AND in the command body — scoped to one command, so apps that read secrets from config files just work. OFF by default: the product's primary guarantee is redaction (no vault value reaches the model), not reference rendering, so apps just read their own local files (e.g. a .env holding the real value) and the model only ever sees the redacted form. 'on' enables rendering (Linux uses a private bind-mount; macOS/Windows render in place and restore via a crash-recovery journal); 'auto' enables it wherever a vault resolves; 'off' (default) disables it. The redaction guard runs regardless. In Cowork the sandbox is the value-delivery channel and is always on.",
-      "default": "off"
-    },
     "preload_secrets": {
       "type": "string",
       "title": "Proactive full-vault redaction guard",
@@ -112,28 +106,16 @@
       "description": "What to do when the redaction guard cannot verify a text because the vault values could not be loaded (e.g. the local ksm/op profile is not initialized or failed to load). 'auto' (default) degrades to the built-in pattern detector instead of blocking, so a machine without a working vault is not bricked. 'on' fails closed: it blocks prompts, tool inputs and tool outputs that cannot be verified against the vault (use where redaction is mandatory and every machine has a working profile). 'off' never fails closed.",
       "default": "auto"
     },
-    "sandbox_globs": {
+    "require_vault": {
       "type": "string",
-      "title": "Sandbox file globs",
-      "description": "Comma-separated filename globs the sandbox scans for references under the working directory, overriding the default set (.env, .env.*, *.env, *.yaml, *.yml, *.json, *.toml, *.ini, *.properties, *.conf, *.cfg, *.config, *.tfvars, *.envrc). Keep it targeted so the scan stays fast on large repos.",
-      "default": ""
+      "title": "Require a configured vault (onboarding gate)",
+      "description": "When 'on' (the DEFAULT) and NO vault is configured at all, a prompt is BLOCKED with setup instructions: in Keeper create a Shared Folder, in Secrets Manager create an Application bound to it, get a one-time token, and run `secrets-guard install` (which installs the Keeper CLI if missing, asks for the token interactively, initializes the profile, and validates). Set 'off' to allow use without a vault (the guard then degrades to the pattern detector). Only gates the no-vault onboarding block; a configured vault is never affected.",
+      "default": "on"
     },
     "shell_tools": {
       "type": "string",
       "title": "Extra shell tool names",
       "description": "Comma-separated extra tool names to treat as shell command execution (wrap + redact), beyond the built-in 'Bash' and the MCP shell pattern (any name ending in '__bash'/'__shell', e.g. Cowork's mcp__workspace__bash). Use only if a host exposes a shell under a name the pattern doesn't catch.",
-      "default": ""
-    },
-    "kernel_dlp": {
-      "type": "string",
-      "title": "Kernel-enforced file rendering (deprecated, no-op)",
-      "description": "DEPRECATED / no-op. secrets-guard no longer uses WinFsp or a system service: it runs entirely per-user (the local ksm/op profile + an in-memory cache) and needs no administrator rights. This option is kept only for backward compatibility and is ignored. The sandbox, when enabled, uses the in-place renderer with a crash-recovery journal.",
-      "default": "off"
-    },
-    "dlp_install_source": {
-      "type": "string",
-      "title": "Installer source (deprecated, no-op)",
-      "description": "DEPRECATED / no-op. secrets-guard no longer downloads or installs any system service (the old sandbox-dlp / WinFsp component was removed); it runs entirely per-user from the local ksm/op profile. Kept only for backward compatibility and ignored.",
       "default": ""
     }
   }

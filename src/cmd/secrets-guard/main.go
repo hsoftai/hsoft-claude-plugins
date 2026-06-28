@@ -68,9 +68,6 @@ func main() {
 		case "cw-run":
 			runCwRun()
 			return
-		case "sandbox":
-			runSandbox()
-			return
 		case "run":
 			runRun()
 			return
@@ -151,15 +148,8 @@ func runHook() {
 		if len(staleComponents()) > 0 {
 			removeStale()
 		}
-		// Crash recovery: if a previous sandbox command was hard-killed mid-render on
-		// macOS/Windows (in-place file rendering), restore the original references now.
-		recoverSandboxJournals()
-		// Cowork: bring up the host-side secret daemon (cw-host) so the VM can
-		// resolve references over the sealed-box disk channel (the VM has no vault
-		// CLI). No-op in plain Claude Code.
-		if cfg.IsCowork {
-			spawnCwHost(cfg, in.SessionID)
-		}
+		// secrets-guard is inert in Cowork (the agent runs in a VM); it only operates in
+		// Claude Code local, so SessionStart does nothing Cowork-specific.
 		// Proactive redaction guard: preload every vault value into this session's
 		// in-memory cache so any later prompt/tool/file-read containing a secret is
 		// redacted or blocked before reaching the model. Detached so it never delays
@@ -195,9 +185,6 @@ func runHook() {
 		}
 	}
 	h := hook.NewHandler(toHookConfig(cfg, resolver.ProviderName(), cfg.GuardRequired == "on", guardReady), eng, red, resolver, valueGuard(), self)
-	if cfg.IsCowork {
-		h.SetCoworkAnchor(coworkAnchor{})
-	}
 	out := h.Handle(in)
 
 	audit.New(cfg.AuditLogPath).Log(audit.Record{
@@ -290,15 +277,16 @@ func runScan() {
 // since Claude Code 2.1.x does not honor PostToolUse output rewriting.
 func runRedactStream() {
 	cfg := config.Load(os.Getenv)
-	eng := buildEngine(cfg)
-	red := redact.New(eng)
 	data, _ := io.ReadAll(bufio.NewReader(os.Stdin))
-	text := string(data)
+	fmt.Fprint(os.Stdout, redactText(cfg, os.Getenv("SG_SESSION"), string(data)))
+}
 
-	// Redact this session's already-resolved secret values (in any reversible
-	// encoding). Prefer the in-memory cache daemon; fall back to re-resolving the
-	// recorded references in ephemeral memory if the daemon is unavailable.
-	if session := os.Getenv("SG_SESSION"); session != "" {
+// redactText removes secrets from text: first the session's known vault values (in any
+// reversible encoding) via the in-memory cache, falling back to re-resolving the recorded
+// references in ephemeral memory if the cache is unavailable; then the built-in
+// high-confidence detectors. Shared by `redact-stream` and `run`'s output redaction.
+func redactText(cfg config.Config, session, text string) string {
+	if session != "" {
 		if _, red, ok := valueGuard().Scan(session, text); ok {
 			text = red
 		} else if paths := seen.LoadPaths(session); len(paths) > 0 {
@@ -309,10 +297,8 @@ func runRedactStream() {
 			}
 		}
 	}
-
-	// Then the built-in high-confidence detectors.
-	out, _ := red.Redact(text)
-	fmt.Fprint(os.Stdout, out)
+	out, _ := redact.New(buildEngine(cfg)).Redact(text)
+	return out
 }
 
 // runMCP serves the vault-catalog MCP tools. The tools list accounts, items and
@@ -583,16 +569,20 @@ func runRun() {
 	if len(allRefs) > 0 {
 		values, rerr := resolveRefsLocal(cfg, allRefs)
 		if rerr != nil {
-			fmt.Fprintln(os.Stderr, "secrets-guard run:", rerr)
-			os.Exit(1)
+			// No vault at all: warn but DEGRADE — run the command with references left
+			// unresolved rather than aborting (the child fails on its own if it needs them).
+			fmt.Fprintln(os.Stderr, "secrets-guard run: aviso:", rerr)
+			values = map[string]string{}
 		}
 		for k, refs := range refsByKey {
 			s := env[k]
 			for _, ref := range refs {
 				val, ok := values[ref]
 				if !ok {
-					fmt.Fprintf(os.Stderr, "secrets-guard run: no se pudo resolver %s\n", ref)
-					os.Exit(1)
+					// A single unresolvable reference is non-fatal: leave it literal and keep
+					// going so other (resolvable) references in the command still work.
+					fmt.Fprintf(os.Stderr, "secrets-guard run: aviso: no se pudo resolver %s (se deja sin resolver)\n", ref)
+					continue
 				}
 				s = strings.ReplaceAll(s, ref, val)
 				resolvedVals = append(resolvedVals, val)
@@ -745,16 +735,14 @@ func toHookConfig(c config.Config, vaultName string, failClosed, guardReady bool
 		ToolOutputMode:      c.ToolOutputMode,
 		CommandReferences:   c.CommandReferences,
 		VaultName:           vaultName,
-		// Cowork uses the sealed-box disk channel (anchor + one-time token).
-		CoworkMode:    c.IsCowork,
-		CoworkIsolate: c.CoworkIsolate,
-		// Wrap Bash commands in `secrets-guard sandbox` when a local vault is available to
-		// resolve references (sandbox=auto); `on` forces it, `off` (the default) disables it.
-		SandboxMode: c.SandboxWrap(vaultName != "none"),
-		ShellTools:  splitList(c.ShellTools),
-		// Fail closed when the redaction guard is mandatory but unavailable. Resolved by
-		// guardMode (GUARD_REQUIRED + service reachability), so a machine without the
-		// service degrades to the detector instead of blocking every prompt and tool.
+		// secrets-guard is inert in Cowork; this only short-circuits Handle to a no-op there.
+		CoworkMode: c.IsCowork,
+		ShellTools: splitList(c.ShellTools),
+		// Onboarding gate: block a prompt with setup instructions when no vault is configured.
+		// Default on; require_vault=off allows use without a vault.
+		RequireVault: c.RequireVault != "off",
+		// Fail closed when the redaction guard is mandatory but the vault values could not be
+		// loaded; otherwise degrade to the detector instead of blocking every prompt and tool.
 		RequireGuard: failClosed,
 		// GuardReady reflects whether the vault values are actually loaded into the cache.
 		// False when a vault is configured but its values failed to load: PostToolUse then

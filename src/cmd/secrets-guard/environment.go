@@ -7,6 +7,7 @@ import (
 
 	"github.com/hsoftai/hsoft-claude-plugins/internal/cache"
 	"github.com/hsoftai/hsoft-claude-plugins/internal/config"
+	"github.com/hsoftai/hsoft-claude-plugins/internal/vault"
 )
 
 // This file orchestrates the per-user, NO-ADMIN install/uninstall of secrets-guard in the
@@ -83,27 +84,52 @@ func runInstall() {
 		}
 	}
 
+	// Ensure a vault CLI is available, auto-installing the Keeper CLI if none is present.
+	cliOK, cliDetail := ensureVaultCLI()
+	fmt.Printf("  • Vault CLI: %s\n", cliDetail)
+
 	prov, ready, detail := vaultStatusBrief(cfg)
+	// If a CLI is present but no profile is configured yet, offer to initialize it now by
+	// pasting a one-time token (interactive).
+	if !ready && cliOK {
+		if token := promptKeeperToken(); token != "" {
+			fmt.Println("    initializing Keeper profile ...")
+			if out, err := vault.InitKeeperProfile(token); err != nil {
+				fmt.Fprintf(os.Stderr, "    ✗ profile init failed: %v\n", err)
+				if out != "" {
+					fmt.Fprintln(os.Stderr, "      "+out)
+				}
+			} else {
+				fmt.Println("    ✓ profile initialized")
+			}
+			cfg = config.Load(os.Getenv) // re-read in case init set env hints
+			prov, ready, detail = vaultStatusBrief(cfg)
+		}
+	}
+
 	if ready {
-		fmt.Printf("  • Vault: %s ready (%s) — full redaction guard active\n", prov, detail)
+		fmt.Printf("  • Vault: %s reachable and VALIDATED (%s) — full redaction guard active\n", prov, detail)
 		if sess := os.Getenv("SG_SESSION"); sess != "" {
 			if vals, e := allVaultValues(cfg); e == nil && len(vals) > 0 {
 				cache.New().Add(sess, vals)
 			}
 		}
 	} else {
-		fmt.Printf("  • Vault: not initialized yet — %s\n", detail)
-		fmt.Println("    initialize it (e.g. `ksm profile init <one-time-token>`); until then the guard uses the pattern detector and never blocks use.")
+		fmt.Printf("  • Vault: NOT configured/validated — %s\n", detail)
+		printKeeperSetupSteps()
 	}
 
 	fmt.Println()
 	switch {
-	case !hadCLI && len(stale) == 0:
-		fmt.Println("Clean install complete.")
-	case len(stale) > 0:
-		fmt.Println("Setup complete — cleaned up legacy components and configured the rest.")
+	case ready:
+		fmt.Println("Setup complete and validated — secrets-guard is fully active.")
+	case cliOK:
+		fmt.Println("Setup almost done — the CLI is ready; initialize your vault (steps above) and re-run.")
 	default:
-		fmt.Println("Already set up — refreshed the CLI; nothing else to do.")
+		fmt.Println("Setup incomplete — install a vault CLI and initialize your vault (steps above).")
+	}
+	if !ready {
+		fmt.Println("Note: with require_vault=on (default), prompts are blocked until the vault is configured.")
 	}
 	printPathHint(filepath.Dir(dst))
 }

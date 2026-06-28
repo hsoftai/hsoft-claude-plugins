@@ -29,26 +29,6 @@ type Config struct {
 	CoworkIsolate   bool   // wrap the VM child in a user/pid/mount namespace (unshare)
 	CoworkRefPolicy string // audit (default) | enforce — resolve any token-authed ref, or only host-approved
 
-	// Sandbox renders vault references (in env AND in matched files under cwd) into
-	// real values inside an ephemeral per-command mount namespace, so apps that read
-	// secrets from files — not just `secrets-guard run --env-file` — just work.
-	//
-	// DEFAULT off: the product's primary guarantee is that NO secret value reaches the
-	// model's context (the redaction guard inspects every prompt and tool input/output).
-	// Reference rendering is an opt-in convenience (`on`), not the default. Apps keep
-	// reading their own local files (e.g. a `.env` with the real value); the model only
-	// ever sees the redacted form. In Cowork the sandbox is the value-delivery channel,
-	// so SandboxWrap forces it on there regardless of this setting.
-	Sandbox      string // auto | on | off
-	SandboxGlobs string // comma-separated globs overriding the default scan set
-
-	// KernelDLP is DEPRECATED / no-op. The old WINDOWS sandbox-dlp / WinFsp service was
-	// removed: secrets-guard runs entirely per-user (local ksm/op profile + in-memory
-	// cache) and the sandbox, when enabled, uses the in-place renderer with a recovery
-	// journal on every OS. Kept only for backward compatibility and ignored.
-	KernelDLP        string // deprecated / no-op
-	DLPInstallSource string // deprecated / no-op (no installer is downloaded any more)
-
 	// PreloadSecrets controls the proactive full-vault redaction guard: at
 	// SessionStart secrets-guard loads EVERY value the vault exposes to its
 	// credential into the per-session in-memory cache (never disk), so any later
@@ -72,6 +52,14 @@ type Config struct {
 	//   off: never fail closed (always degrade to the detector).
 	GuardRequired string // auto | on | off
 
+	// RequireVault gates onboarding enforcement. When `on` (the DEFAULT) and NO vault is
+	// configured at all, a prompt is BLOCKED with setup instructions (create a Keeper Shared
+	// Folder, a Secrets Manager application bound to it, get a one-time token, run
+	// `secrets-guard install`). Set `off` to allow use without a vault (degrade to the pattern
+	// detector). It only gates the no-vault onboarding block; a configured vault is never
+	// affected by this option.
+	RequireVault string // on (default) | off
+
 	// IsCowork is the resolved detection: true when this process is the Cowork host
 	// hook (the agent's commands run in the VM). Deterministic via
 	// CLAUDE_CODE_IS_COWORK; an explicit execution_mode of cowork/local overrides it.
@@ -93,10 +81,9 @@ func Load(env Getenv) Config {
 		CommandReferences:   "inject",
 		ExecutionMode:       "auto",
 		CoworkRefPolicy:     "audit",
-		Sandbox:             "off",
-		KernelDLP:           "auto",
 		PreloadSecrets:      "auto",
 		GuardRequired:       "auto",
+		RequireVault:        "on",
 	}
 
 	c.VaultProvider = oneOf(env(prefix+"VAULT_PROVIDER"), c.VaultProvider, "auto", "keeper", "1password")
@@ -114,12 +101,9 @@ func Load(env Getenv) Config {
 	c.CoworkSpool = strings.TrimSpace(env(prefix + "COWORK_SPOOL"))
 	c.CoworkIsolate = boolOr(env(prefix+"COWORK_ISOLATE"), false)
 	c.CoworkRefPolicy = oneOf(env(prefix+"COWORK_REF_POLICY"), c.CoworkRefPolicy, "audit", "enforce")
-	c.Sandbox = oneOf(env(prefix+"SANDBOX"), c.Sandbox, "auto", "on", "off")
-	c.SandboxGlobs = strings.TrimSpace(env(prefix + "SANDBOX_GLOBS"))
-	c.KernelDLP = oneOf(env(prefix+"KERNEL_DLP"), c.KernelDLP, "auto", "require", "off")
-	c.DLPInstallSource = strings.TrimSpace(env(prefix + "DLP_INSTALL_SOURCE"))
 	c.PreloadSecrets = oneOf(env(prefix+"PRELOAD_SECRETS"), c.PreloadSecrets, "auto", "on", "off")
 	c.GuardRequired = oneOf(env(prefix+"GUARD_REQUIRED"), c.GuardRequired, "auto", "on", "off")
+	c.RequireVault = oneOf(env(prefix+"REQUIRE_VAULT"), c.RequireVault, "on", "off")
 
 	// Detect the Cowork host hook (the agent's commands run in the VM). The detector
 	// is deterministic — Claude Code sets CLAUDE_CODE_IS_COWORK=1 in the host hook's
@@ -138,29 +122,6 @@ func Load(env Getenv) Config {
 		c.CoworkSpool = strings.TrimSpace(env("CLAUDE_PROJECT_DIR"))
 	}
 	return c
-}
-
-// SandboxWrap reports whether the hook should wrap a Bash command with the
-// `secrets-guard sandbox` runner (transparent env + file + command rendering).
-// hasVault indicates a local vault is present.
-//
-// The sandbox runs on every platform: Linux uses a private bind-mount (the value
-// never touches the real disk), and macOS/Windows render files in place with a
-// guaranteed restore. In Cowork the command runs in the Linux VM and the sandbox is
-// the ONLY value-delivery channel, so it is always on there (checked first, before
-// `off`). Otherwise: `off` (the default) disables it; `on` forces it; `auto` enables
-// it wherever a vault can resolve.
-func (c Config) SandboxWrap(hasVault bool) bool {
-	if c.IsCowork {
-		return true // Cowork delivers values only through the sandbox channel
-	}
-	if c.Sandbox == "off" {
-		return false
-	}
-	if c.Sandbox == "on" {
-		return true
-	}
-	return hasVault // auto
 }
 
 // PreloadEnabled reports whether the proactive full-vault redaction guard should

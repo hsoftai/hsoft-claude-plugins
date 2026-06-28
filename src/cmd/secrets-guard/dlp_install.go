@@ -66,8 +66,8 @@ func runDoctor() {
 	} else {
 		fmt.Printf("  vault:          %s reachable (%d secret values)\n", prov, n)
 	}
-	fmt.Printf("  options:        sandbox=%s preload_secrets=%s guard_required=%s\n",
-		cfg.Sandbox, cfg.PreloadSecrets, cfg.GuardRequired)
+	fmt.Printf("  options:        preload_secrets=%s guard_required=%s\n",
+		cfg.PreloadSecrets, cfg.GuardRequired)
 	fmt.Println("  model:          local — ksm/op profile + in-memory cache (no service, no WinFsp, no admin)")
 	// The single most common misconfiguration: a reachable vault but preload_secrets=off, so
 	// the full-vault cache is never populated and a file/tool read of a secret that was not

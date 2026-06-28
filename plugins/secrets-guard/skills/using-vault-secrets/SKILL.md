@@ -19,13 +19,16 @@ value at execution time. You only ever see the reference.
    the tool call and let the hook resolve it.
 3. Put references verbatim into the tool that needs the secret (Write content,
    Bash command, config file). Do not modify them.
-4. **Never run the vault CLI yourself** (`ksm`, `keeper`, `op`, or `secrets-guard
-   read|run`) in a Bash command — the hook denies it, so a raw secret value can't be
-   pulled into your context. To inspect or create secrets, use the **MCP tools**
+4. **Never run the vault CLI yourself** (`ksm`, `keeper`, `op`) or `secrets-guard read`
+   in a Bash command — the hook denies them, because they print a raw value to stdout
+   that would reach your context. To inspect or create secrets, use the **MCP tools**
    (`list_secrets`, `search_secrets`, `list_fields`, `create_secret`, `vault_status`);
    they read the local vault and return metadata and references only — never a value.
-   To *use* a secret, put its reference in a `.env`/config or command and run the
-   command normally (see "Running code").
+   **`secrets-guard run --env-file .env -- <cmd>` IS allowed** (and is the way to launch
+   an app that needs real values): it injects the resolved values only into the child
+   process's environment — never into stdout, the command body, or disk — and its output
+   stays redacted. To *use* a secret, put its reference in a `.env`/config or directly in
+   a command and run it (see "Running code").
 
 ## Workflow
 
@@ -64,10 +67,16 @@ secrets-guard treats files and commands differently:
   is NEVER written to disk. So writing `DB_PASSWORD=op://7FWKE:Private/prod-db/password`
   to a `.env` leaves exactly that reference in the file. This is correct and safe:
   the secret never lands on disk, in a commit, or in a backup.
-- **Bash commands:** the reference IS resolved to the real value at execution,
-  and the command's output is redacted so the value never reaches the chat. E.g.
-  `PGPASSWORD=op://7FWKE:Private/prod-db/password psql -h db ...` runs with the
-  real password; if it prints, it shows `[REDACTED BY SECRETS-GUARD]`.
+- **Bash commands:** each reference is provisioned into the command's child process
+  **environment** at execution — never written into the command text. The hook rewrites
+  the reference to a `${SG_REF_n}` placeholder and wraps the command in `secrets-guard
+  run`, which resolves the value into the child env; the command's output is redacted so
+  the value never reaches the chat. E.g.
+  `PGPASSWORD=op://7FWKE:Private/prod-db/password psql -h db ...` runs with the real
+  password in `PGPASSWORD`; if it prints, it shows `[REDACTED BY SECRETS-GUARD]`. You don't
+  do anything special — just put the reference in the command. (Because the value goes to
+  the environment and never into the command string, it's invisible to the shell, the
+  transcript, disk, and Claude Code's own permission classifier.)
 
 So **never write a secret value to a file** — write the reference. The value
 only ever materializes inside a running command, in memory.
@@ -83,78 +92,82 @@ secret (bad) or the resolver command would fail (`op read <value>` is invalid).
 
 secrets-guard handles this for you:
 
-- **Resolver commands keep the reference automatically.** `op read`, `op inject`,
-  `op run`, `ksm secret notation`, `ksm exec`, `secrets-guard read` and
-  `secrets-guard run` are detected; their references are left literal (and still
-  resolved internally, so any value in their output is redacted). You can run
-  `op read "op://…"` and it works.
-- **Escape one occurrence with a backslash.** When you write a command/script
-  where a specific `op://…` must stay literal, prefix it with `\`:
-  `echo '\op://Private/db/password' >> .env` writes the reference, not the value.
-  The backslash is stripped from the output; other occurrences still resolve.
+- **`secrets-guard run` keeps its references literal automatically.** A
+  `secrets-guard run --env-file .env -- <cmd>` (or `--ref NAME=ref`) invocation is
+  detected; its references are left literal so `run` resolves them itself into the child
+  env at execution. (The vault CLIs `op`/`ksm`/`keeper` and `secrets-guard read` are NOT
+  a literal-keep case — they are DENIED outright, because they print a value to stdout.)
+- **Escape one occurrence with a backslash.** To keep a SPECIFIC reference literal in a
+  Bash command, put a single `\` **immediately before the scheme** (no space):
+  `\op://…` or `\keeper://…`. That occurrence is NOT resolved or env-injected — it is
+  emitted verbatim with the backslash removed; every other (unescaped) reference in the
+  same command still env-injects normally. Use this whenever a Bash command must *write or
+  display the reference text itself* rather than use the secret — e.g. generating a `.env`,
+  a `start.sh`, a README, or echoing a reference for the user:
+
+  ```sh
+  echo 'DB_PASSWORD=\keeper://UID/field/password' >> .env   # writes the reference, not the value
+  printf 'use %s\n' '\op://Private/api/token'                # prints the reference literally
+  ```
+
+  The `\` must touch the scheme: `\keeper://…` works; `\ keeper://…` (with a space) does
+  not. (Prefer the **Write/Edit** tools to put a reference in a file — they keep it literal
+  with no escaping needed; the backslash escape is only for when you must do it via Bash.)
 - **Keep them all:** the operator can set `command_references: keep` to make every
   reference in every command stay literal.
 
 Rule of thumb: when the goal is to **use** the secret now (connect, authenticate,
-run a query), let it inject. When the goal is to **write down the reference** (a
-script, a `.env`, a config the app reads later via `secrets-guard run`), keep it
-literal — write the reference, escaping with `\` if needed.
+run a query), put the reference in the command and let it env-inject. When the goal is to
+**write down the reference** (a script, a `.env`, a config the app reads later via
+`secrets-guard run`), keep it literal — write the reference, escaping with `\` if needed.
 
-## Claude Cowork (commands run in a VM)
+## Claude Cowork
 
-If you are in Cowork, your Bash commands run in an isolated VM that has no vault
-CLI. The host resolves references and delivers values to the VM over a secure
-sealed-box channel on the shared disk, used **only in process memory**. Two rules
-in Cowork:
-
-1. **Consume secrets only via `secrets-guard run --env-file .env -- <cmd>`.** Write
-   the `.env` with the **Write tool** (it keeps the reference, e.g.
-   `DB=op://Private/db/password`), then run your command through `secrets-guard
-   run`. The value is injected into the child's environment and never becomes
-   visible to the shell or written to disk.
-2. **Inline references and `secrets-guard read` do not return a value in the VM**
-   (that would expose the value to the shell, which could write it to disk). So
-   `curl -H "Authorization: op://…"` won't work inline — instead put the token in a
-   `.env` and run `secrets-guard run --env-file .env -- sh -c 'curl -H
-   "Authorization: $TOKEN" …'`.
-
-If a reference fails with `ref-not-approved`, write it as a `KEY=op://…` line in a
-`.env` via the Write tool first (that authorizes it), then run. Never paste a value.
+secrets-guard is **inert in Cowork** (where your tools run in a VM): it does not inspect,
+redact, deny, or rewrite anything there. This skill applies to **Claude Code (local)**. In
+Cowork there is no secrets-guard protection right now, so do not rely on it; handle secrets
+per your Cowork environment's own rules.
 
 ## Running code that needs the secrets (the key pattern)
 
-Because `.env` files hold *references*, a normal app (`python-dotenv`, `godotenv`,
-node `dotenv`, etc.) would read the literal `op://…` string, not the value. When the
-operator enables **in-place rendering (`SANDBOX=on`)** you do nothing special: just run
-the app's normal command in Bash and the PreToolUse hook renders every reference — in
-the environment **and** in files under the working directory (`.env`, config) — into
-real values for **that command's process** for the duration of the run, then restores the
-references immediately after. The values live only in process memory; the files keep the
-references afterward. (The redaction guard, which reads your local vault and blocks vault
-values from reaching the model, runs regardless of this setting.)
+Because `.env` files hold *references* (the value is never written to disk), a normal app
+(`python-dotenv`, `godotenv`, node `dotenv`, etc.) would read the literal `keeper://…` /
+`op://…` string, not the value. To launch such an app with the real values, run it through
+**`secrets-guard run --env-file .env -- <cmd>`**: it resolves every reference in the `.env`
+and injects the real value into the child process's **environment** (memory only, never the
+command text or disk), and the command's output stays redacted. This is allowed from inside
+Claude Code.
 
 ```sh
-npm run dev            # the .env's keeper://… / op://… is served only to this subtree
-node server.js
-python app.py
-go run .
+secrets-guard run --env-file .env -- npm run dev
+secrets-guard run --env-file .env -- node server.js
+secrets-guard run --env-file .env -- python app.py
+secrets-guard run --env-file .env -- go run .
 ```
 
-Do **not** wrap these in `secrets-guard run` / `op run` / `ksm exec` yourself — with
-in-place rendering on the hook already does the rendering, and it denies those resolving
-subcommands (only the guard may touch the vault). Just run the command as the project
-normally would.
+Alternatively, if the secret goes on the command line itself (not via a `.env`), just put the
+reference directly in the command and run it — the hook env-injects it automatically:
+
+```sh
+PGPASSWORD=keeper://<uid>/field/password psql -h db -U app   # value goes to the child env
+```
 
 Write the app to read config from the **environment** (12-factor):
 `os.environ["DB_PASSWORD"]` / `process.env.DB_PASSWORD` / `os.Getenv("DB_PASSWORD")`,
 and put the references in `.env`. The value lives only in the process's memory; the
 `.env` on disk keeps the reference.
 
-**For the developer running it outside Claude Code** (or when in-place rendering is off),
-the portable manual command is `secrets-guard run --env-file .env -- <cmd>`
+**For the developer running it outside Claude Code,**
+the portable manual command is the same `secrets-guard run --env-file .env -- <cmd>`
 (equivalently `op run --env-file=.env -- <cmd>` for 1Password or `ksm exec -- <cmd>`
-for Keeper). That is what goes in the README / `start.sh` for humans — you don't run
-it from inside Claude Code when in-place rendering is on.
+for Keeper). That is what goes in the README / `start.sh` for humans, and it is the same
+command you run from inside Claude Code.
+
+### Note on the Read tool
+
+If you `Read` a file that contains a real vault value, secrets-guard **denies the read**
+(this Claude Code version can't redact a structured Read result, so it blocks rather than
+leak). That's expected — work with the reference instead of the file's literal value.
 
 ## Found a hardcoded secret? Offer to migrate it to the vault
 
@@ -234,10 +247,9 @@ secret comes from** (vault instead of hardcode) and **how the app is launched**.
 
 ## Startup patterns by ecosystem (maximize compatibility)
 
-The app reads from env; only the launcher resolves references. These are the
-commands the **developer** runs manually / puts in the README or `start.sh` — inside
-Claude Code with in-place rendering on you just run the bare command (`node server.js`)
-and the hook renders the references. Pick what fits:
+The app reads from env; only the launcher (`secrets-guard run`) resolves references. These
+are the commands to launch the app — the same ones the **developer** puts in the README or
+`start.sh` and that you run from inside Claude Code. Pick what fits:
 
 - **npm/Node:** add a script — `"start:secure": "secrets-guard run --env-file .env -- node server.js"`.
 - **Python:** `secrets-guard run --env-file .env -- gunicorn app:app` (or uvicorn,
@@ -277,7 +289,12 @@ and the hook renders the references. Pick what fits:
 
 ## If something is missing
 
-- No vault active (`vault_status` says unavailable): tell the user to install/sign
-  in to Keeper or 1Password, or set the account. Do not fall back to plaintext.
+- **No vault configured at all:** with `require_vault` on (the default) the prompt is
+  blocked before it reaches you, with onboarding steps. Tell the user to run
+  **`secrets-guard install`** in a terminal — it installs the Keeper CLI if missing, asks for
+  a one-time token interactively (from a Keeper Secrets Manager **Application bound to a
+  Shared Folder**), initializes the profile, and validates the connection. Then restart
+  Claude Code. (An operator can set `require_vault=off` to allow use without a vault.) Do not
+  fall back to plaintext.
 - A reference fails to resolve (e.g. "multiple accounts"): use `list_accounts`
   and put the right `account` into the reference (`op://<account>:…`).

@@ -6,6 +6,52 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-27
+
+Architecture simplification: two commands only (the hook-injected wrapper + the
+model-facing `secrets-guard run`), no sandbox, inert in Cowork.
+
+### Changed
+- **Bash command references are now provisioned via the child ENVIRONMENT, not injected
+  inline.** The hook replaces each reference with a `${SG_REF_n}` placeholder and wraps the
+  command in `SG_REF_n='<ref>' secrets-guard run -- sh -c '<cmd>'`, which resolves the value
+  into the child process environment. The plaintext value never enters the command text,
+  argv, the shell, the transcript, or disk — so it no longer reaches Claude Code's permission
+  classifier (which previously could echo an inline-injected value back into the model's
+  context). Fixes the inline-injection credential-leak-to-classifier class of bug.
+- **`secrets-guard run` is now allowed for the model** (e.g. `secrets-guard run --env-file
+  .env -- <cmd>`): it injects resolved values only into the child environment and its output
+  stays redacted, giving a functional path to run an app that needs real values from a `.env`
+  with `SANDBOX` gone. `secrets-guard read` and the raw vault CLIs (ksm/op/keeper) remain
+  denied (they print values to stdout).
+- **PostToolUse blocks a confirmed vault-value leak** (already in 0.7.4) instead of relying on
+  the unreliable `updatedToolOutput`.
+
+### Added
+- **Guided onboarding (`secrets-guard install`).** `install` now does the full setup
+  interactively: it auto-detects and installs the Keeper Secrets Manager CLI if missing
+  (winget on Windows, brew/pip elsewhere), prompts for a one-time token, runs
+  `ksm profile init`, and validates the connection — leaving the guard fully active. With a
+  vault already configured it just detects and validates it (no prompt).
+- **`require_vault` onboarding gate (default `on`).** When no vault is configured at all, a
+  prompt is BLOCKED with step-by-step Keeper setup instructions (create a Shared Folder, bind
+  a Secrets Manager Application to it, get a one-time token, run `secrets-guard install`).
+  Set `require_vault=off` to allow use without a vault (degrade to the pattern detector).
+- **Reference parser robustness (A2):** a trailing unbalanced `]` is no longer swallowed into
+  the reference (`keeper://UID/field/password]` resolves the clean reference and keeps the
+  `]` literal); balanced Keeper `[index]` notation is preserved.
+- **Per-reference fail policy (A3):** a single unresolvable reference no longer aborts the
+  whole command — `secrets-guard run` resolves what it can and leaves the rest, degrading
+  instead of failing closed on the entire command.
+
+### Removed
+- **The `sandbox` feature is gone** — the `sandbox` subcommand, in-place file rendering and
+  crash-recovery journal, and the `sandbox`/`sandbox_globs`/`kernel_dlp`/`dlp_install_source`
+  options. Reference provisioning is now exclusively env-injection via `secrets-guard run`.
+- **secrets-guard is INERT in Cowork:** when running on a Cowork host the hook does not
+  inspect, redact, deny, or rewrite anything (even if the plugin is installed and enabled).
+  It operates only in Claude Code (local). Cowork value-delivery will be handled separately.
+
 ## [0.7.4] - 2026-06-27
 
 ### Fixed
