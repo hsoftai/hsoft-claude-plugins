@@ -22,3 +22,4 @@ secrets-guard-envprobe-*.json
 
 # stray local build output
 src/secrets-guard
+.git-commit-msg.txt
