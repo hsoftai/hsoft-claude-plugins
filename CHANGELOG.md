@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-06-30
+
+### Fixed
+- **Keeper profile created with `ksm profile init` is now detected, no re-prompt for a
+  token.** The Keeper CLI only auto-discovers `keeper.ini` in the current directory, so a
+  profile a user initialized from their home was invisible when the hook ran from a project
+  directory: `secrets-guard install` re-prompted for a one-time token and the guard
+  fail-closed-blocked even though a working profile was present. The runner now points `ksm`
+  at the user's config via the global `--ini-file` flag, auto-discovering `~/.keeper/keeper.ini`
+  or `~/keeper.ini` when neither `KSM_CONFIG` (base64) nor `KSM_INI_FILE` is set. Honors
+  `KSM_CONFIG`/`KSM_INI_FILE` unchanged when present.
+
 ## [0.8.0] - 2026-06-27
 
 Architecture simplification: two commands only (the hook-injected wrapper + the
