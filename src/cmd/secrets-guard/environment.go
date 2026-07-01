@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/hsoftai/hsoft-claude-plugins/internal/cache"
 	"github.com/hsoftai/hsoft-claude-plugins/internal/config"
@@ -109,6 +110,24 @@ func runInstall() {
 
 	if ready {
 		fmt.Printf("  • Vault: %s reachable and VALIDATED (%s) — full redaction guard active\n", prov, detail)
+		// Persist the config to a FIXED secrets-guard-managed location so the plugin resolves
+		// it deterministically from any terminal (Windows console, VSCode, …) and any working
+		// directory — independent of the Windows Credential Manager's per-session readability.
+		if prov == "keeper" {
+			if ini, e := vault.ExportKeeperIni(); e == nil && strings.TrimSpace(ini) != "" {
+				p := managedKeeperIni()
+				if e := os.MkdirAll(filepath.Dir(p), 0o700); e == nil {
+					if e := os.WriteFile(p, []byte(ini), 0o600); e == nil {
+						_ = os.Setenv("KSM_INI_FILE", p)
+						fmt.Printf("  • Config: saved to %s (the plugin reads it from every terminal)\n", p)
+					} else {
+						fmt.Fprintf(os.Stderr, "    ⚠ could not write managed config (%v); relying on the CLI default profile\n", e)
+					}
+				}
+			} else if e != nil {
+				fmt.Fprintf(os.Stderr, "    ⚠ could not export config to a portable file (%v); relying on the CLI default profile\n", e)
+			}
+		}
 		if sess := os.Getenv("SG_SESSION"); sess != "" {
 			if vals, e := allVaultValues(cfg); e == nil && len(vals) > 0 {
 				cache.New().Add(sess, vals)

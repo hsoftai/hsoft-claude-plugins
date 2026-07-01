@@ -1,9 +1,8 @@
 package vault
 
 import (
-	"os"
+	"fmt"
 	"os/exec"
-	"path/filepath"
 	"strings"
 )
 
@@ -23,49 +22,6 @@ func (k *keeper) Scheme() string { return "keeper" }
 // may have only one of them on PATH, so we resolve whichever is present — otherwise a
 // host with just `keeper-ksm.exe` reports "vault: none" despite a working CLI.
 var keeperBins = []string{"ksm", "keeper-ksm"}
-
-// keeperINIArgs returns the global `--ini-file` flag (as CLI args) to prepend to a Keeper
-// CLI invocation so an existing profile is found regardless of the process working
-// directory. ksm only auto-discovers keeper.ini in the CURRENT directory, so a profile
-// created with `ksm profile init` from the user's home (the common case) is invisible when
-// the hook runs from a project directory — which made secrets-guard re-prompt for a token
-// and fail-closed even though a working profile was present. Resolution order:
-//   - KSM_CONFIG (base64) set -> nil (the CLI reads the env config directly; no INI needed)
-//   - KSM_INI_FILE set        -> use it verbatim
-//   - otherwise               -> auto-discover the user's keeper.ini (see discoverKeeperINI)
-//
-// Returns nil when none applies, letting ksm fall back to its own current-directory lookup.
-func keeperINIArgs() []string {
-	if os.Getenv("KSM_CONFIG") != "" {
-		return nil
-	}
-	ini := os.Getenv("KSM_INI_FILE")
-	if ini == "" {
-		ini = discoverKeeperINI()
-	}
-	if ini == "" {
-		return nil
-	}
-	return []string{"--ini-file", ini}
-}
-
-// discoverKeeperINI returns the path of an existing per-user Keeper config file, probing the
-// standard locations where `ksm profile init` stores keeper.ini, or "" if none is found.
-func discoverKeeperINI() string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return ""
-	}
-	for _, p := range []string{
-		filepath.Join(home, ".keeper", "keeper.ini"),
-		filepath.Join(home, "keeper.ini"),
-	} {
-		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
-			return p
-		}
-	}
-	return ""
-}
 
 // isKeeperBin reports whether name is one of the recognized Keeper CLI executables.
 func isKeeperBin(name string) bool {
@@ -89,6 +45,22 @@ func InitKeeperProfile(token string) (string, error) {
 // KeeperCLIName returns the Keeper CLI executable name resolvable on PATH (ksm or
 // keeper-ksm), or "ksm" as a default.
 func KeeperCLIName() string { return keeperBin(execRunner{}) }
+
+// ExportKeeperIni exports the active Keeper profile as a complete, plaintext INI config
+// (`ksm profile export --plain --file-format ini`). `secrets-guard install` writes this to a
+// fixed managed location so the plugin can resolve the vault deterministically via the global
+// `--ini-file` flag from any terminal. Returns the INI content (which contains the app's
+// scoped credential — never the user's master secrets) and any error.
+func ExportKeeperIni() (string, error) {
+	out, err := vaultCommand(keeperBin(execRunner{}), []string{"profile", "export", "--plain", "--file-format", "ini"}).Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("profile export failed: %s", strings.TrimSpace(string(ee.Stderr)))
+		}
+		return "", err
+	}
+	return strings.TrimSpace(string(out)) + "\n", nil
+}
 
 // LookKeeper returns the resolved filesystem path of the Keeper CLI (ksm or keeper-ksm)
 // and whether one was found on PATH. Used by command-line diagnostics so they recognize

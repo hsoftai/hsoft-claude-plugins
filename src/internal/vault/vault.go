@@ -6,6 +6,7 @@ package vault
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -37,24 +38,32 @@ func (execRunner) Look(name string) bool {
 }
 
 func (execRunner) Run(name string, args ...string) (string, error) {
-	// Point the Keeper CLI at the user's INI config via the global --ini-file flag. ksm
-	// otherwise only looks for keeper.ini in the CURRENT directory, so a profile initialized
-	// with `ksm profile init` (which the user runs from their home) is invisible when ksm
-	// runs from a project dir ("The Keeper SDK client has not been loaded. The INI config
-	// might not be set."), making secrets-guard re-prompt for a token and fail-closed even
-	// though a working profile exists. keeperINIArgs honors KSM_INI_FILE, else auto-discovers
-	// the user's keeper.ini; it returns nil when KSM_CONFIG (base64) is set or none is found.
-	if isKeeperBin(name) {
-		args = append(keeperINIArgs(), args...)
-	}
+	// Try the DEFAULT config resolution first. On Windows `keeper-ksm profile init` stores the
+	// profile in the Windows Credential Manager (globally resolvable from any directory), and
+	// that must take precedence: a discovered keeper.ini could be stale/invalid and would
+	// otherwise SHADOW a working Credential Manager profile.
 	out, err := vaultCommand(name, args).Output()
-	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			return "", fmt.Errorf("%s failed: %s", name, strings.TrimSpace(string(ee.Stderr)))
-		}
-		return "", err
+	if err == nil {
+		return string(out), nil
 	}
-	return string(out), nil
+
+	// Fallback ONLY when the default resolution failed: point ksm at the secrets-guard-managed
+	// keeper.ini (KSM_INI_FILE) via the global --ini-file flag. ksm otherwise only looks for
+	// keeper.ini in the CURRENT directory, so a profile that lives only in a file is invisible
+	// when ksm runs from a project dir. KSM_CONFIG (base64) needs no INI, so skip then.
+	if isKeeperBin(name) && os.Getenv("KSM_CONFIG") == "" {
+		if ini := os.Getenv("KSM_INI_FILE"); ini != "" {
+			if out2, err2 := vaultCommand(name, append([]string{"--ini-file", ini}, args...)).Output(); err2 == nil {
+				return string(out2), nil
+			}
+		}
+	}
+
+	// Return the DEFAULT resolution's error (the primary path).
+	if ee, ok := err.(*exec.ExitError); ok {
+		return "", fmt.Errorf("%s failed: %s", name, strings.TrimSpace(string(ee.Stderr)))
+	}
+	return "", err
 }
 
 // NewRunner returns the production Runner.

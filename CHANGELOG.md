@@ -6,17 +6,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-07-01
+
+### Fixed
+- **A stale or foreign `~/.keeper/keeper.ini` no longer shadows the working profile.**
+  Supersedes 0.8.1's approach: 0.8.1 made the runner ALWAYS inject `--ini-file`,
+  auto-discovering `~/.keeper/keeper.ini` — but an old config there (whose Keeper application
+  had lost access) then made every secrets-guard `ksm` call fail with "access_denied /
+  Unable to validate Keeper application access", even though the bare `keeper-ksm` CLI worked
+  via the Windows Credential Manager profile. `secrets-guard install` then also failed to
+  validate (and wasted the one-time token). Fixes:
+  - Vault resolution now tries the **default profile (Windows Credential Manager) FIRST** and
+    only falls back to a `--ini-file` config if the default fails (no more shadowing).
+  - The plugin reads its config from a **fixed secrets-guard-managed location**
+    (`%LOCALAPPDATA%\secrets-guard\keeper.ini`), not from `~/.keeper` — so a stray keeper.ini
+    can never shadow it.
+  - **`secrets-guard install` persists the config to that managed location** (via
+    `ksm profile export`), so the vault resolves **deterministically from every terminal**
+    (Windows console, VSCode, …) and working directory, independent of Credential Manager
+    per-session readability.
+
 ## [0.8.1] - 2026-06-30
 
 ### Fixed
-- **Keeper profile created with `ksm profile init` is now detected, no re-prompt for a
-  token.** The Keeper CLI only auto-discovers `keeper.ini` in the current directory, so a
-  profile a user initialized from their home was invisible when the hook ran from a project
-  directory: `secrets-guard install` re-prompted for a one-time token and the guard
-  fail-closed-blocked even though a working profile was present. The runner now points `ksm`
-  at the user's config via the global `--ini-file` flag, auto-discovering `~/.keeper/keeper.ini`
-  or `~/keeper.ini` when neither `KSM_CONFIG` (base64) nor `KSM_INI_FILE` is set. Honors
-  `KSM_CONFIG`/`KSM_INI_FILE` unchanged when present.
+- Attempted to detect a `ksm profile init` profile from any directory by always injecting the
+  global `--ini-file` flag (auto-discovering `~/.keeper/keeper.ini`). This caused a
+  regression when a stale keeper.ini was present — see 0.8.2, which replaces this mechanism.
 
 ## [0.8.0] - 2026-06-27
 
