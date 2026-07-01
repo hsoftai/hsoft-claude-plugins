@@ -221,6 +221,10 @@ func runPreloadSecrets() {
 	// AddPrimed marks the session loaded (even if the vault is empty), so the hook does not
 	// reload it on the first tool event.
 	cache.New().AddPrimed(session, vals)
+	// Self-heal: persist the config to the managed location so the vault resolves from every
+	// terminal (VSCode included) even if the Windows Credential Manager isn't readable there.
+	// No-op when the default profile isn't reachable; keeps any existing managed file.
+	persistManagedKeeperIni()
 }
 
 // ensureCachePrimed guarantees the full vault is loaded into the session cache before a

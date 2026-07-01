@@ -17,6 +17,29 @@ import (
 // converge to the same working state: the CLI on PATH, legacy components removed, and the
 // redaction guard reading the user's local vault.
 
+// persistManagedKeeperIni refreshes the secrets-guard-managed keeper.ini from the active
+// Keeper profile via the DEFAULT resolution (Windows Credential Manager / current-dir), when
+// that profile is reachable. This makes the vault resolve deterministically from EVERY
+// terminal — VSCode included — even when the Credential Manager isn't readable in that
+// process context: the file is a portable fallback the hook uses via `--ini-file`. Runs on
+// the async preload path so it never delays session start; best-effort and silent, and it
+// leaves any existing managed config untouched when the default profile isn't reachable
+// (so a transient outage doesn't wipe a good file).
+func persistManagedKeeperIni() {
+	p := managedKeeperIni()
+	if p == "" {
+		return
+	}
+	ini, err := vault.ExportKeeperIni()
+	if err != nil || strings.TrimSpace(ini) == "" {
+		return
+	}
+	if os.MkdirAll(filepath.Dir(p), 0o700) != nil {
+		return
+	}
+	_ = os.WriteFile(p, []byte(ini), 0o600)
+}
+
 // removeIfExists deletes a file or directory if present; returns true if it existed.
 func removeIfExists(path string) bool {
 	if path == "" {

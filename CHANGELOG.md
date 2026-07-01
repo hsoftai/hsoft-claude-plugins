@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-07-02
+
+### Fixed
+- **The vault now keeps working in the VSCode terminal / extension, not just the Windows
+  console — permanently.** Root cause (replicated): `keeper-ksm profile init` stores the
+  profile in the Windows Credential Manager, which is NOT reliably readable from every process
+  context (e.g. the VSCode-spawned hook). While the per-session cache was warm it worked, but
+  after the cache's 30-minute idle timeout the re-prime needed the vault, couldn't read the
+  Credential Manager there, and — under `guard_required=on` — failed closed with "DLP guard
+  unavailable". (The Keeper one-time token does NOT expire; the profile is permanent — this was
+  never a token issue.)
+- **Self-healing managed config:** the SessionStart preload now refreshes the
+  secrets-guard-managed `keeper.ini` (`%LOCALAPPDATA%\secrets-guard\keeper.ini`) from the active
+  profile whenever the default resolution is reachable, so a portable, file-based config is
+  always present. Combined with 0.8.2's default-first + `--ini-file` fallback, the vault then
+  resolves deterministically from every terminal — even when the Credential Manager isn't
+  readable. It never wipes an existing managed config when the default profile is momentarily
+  unreachable.
+
 ## [0.8.2] - 2026-07-01
 
 ### Fixed
