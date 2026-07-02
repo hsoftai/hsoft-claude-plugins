@@ -45,13 +45,12 @@ uso normal.
 > directorio de trabajo. Ya **no** hace falta fijar `KSM_INI_FILE` a mano en la mayoría de
 > los equipos.
 
-`SANDBOX` queda en `off` por defecto (solo redacción); `SANDBOX=on` habilita el renderizado
-de referencias en sitio. `KERNEL_DLP` está **deprecado / es no-op**. El valor por defecto
-`GUARD_REQUIRED=auto` cae al detector de patrones cuando la bóveda no está disponible (nunca
-brickea el uso). `GUARD_REQUIRED=on` hace que el guard **falle cerrado**: además de bloquear
-prompts/entradas sin verificar, **bloquea la salida de una herramienta cuando hay una bóveda
-configurada pero sus valores no se pudieron cargar** (no se puede garantizar que la salida no
-contenga un secreto, así que se retiene "si no se puede redactar, se bloquea la lectura").
+El managed-settings de abajo viene en **modo estricto** (Keeper obligatorio, bloqueo por
+defecto): `REQUIRE_VAULT=on` bloquea los prompts con onboarding si no hay bóveda;
+`GUARD_REQUIRED=on` hace que el guard **falle cerrado** (bloquea prompts/entradas/salidas que
+no se puedan verificar contra la bóveda, en vez de degradar al detector); `PRELOAD_SECRETS=on`
+carga toda la bóveda y redacta/bloquea cualquier valor. Si prefieres no bloquear, cambia
+`REQUIRE_VAULT`/`GUARD_REQUIRED` a `off`/`auto` (degrada al detector y nunca brickea).
 
 ## Requisitos previos
 
@@ -134,14 +133,26 @@ Pega este contenido y **guárdalo como UTF-8 (sin BOM)**:
     "CLAUDE_PLUGIN_OPTION_BLOCK_ON_PROMPT_SECRET": "true",
     "CLAUDE_PLUGIN_OPTION_TOOL_INPUT_POLICY": "deny",
     "CLAUDE_PLUGIN_OPTION_TOOL_OUTPUT_MODE": "redact",
-    "CLAUDE_PLUGIN_OPTION_SANDBOX": "off",
-    "CLAUDE_PLUGIN_OPTION_PRELOAD_SECRETS": "auto",
-    "CLAUDE_PLUGIN_OPTION_GUARD_REQUIRED": "auto",
-    "CLAUDE_PLUGIN_OPTION_AUDIT_LOG_PATH": "C:\\ProgramData\\secrets-guard\\audit.log",
-    "KSM_CONFIG": "<base64-keeper-config>"
+    "CLAUDE_PLUGIN_OPTION_PRELOAD_SECRETS": "on",
+    "CLAUDE_PLUGIN_OPTION_GUARD_REQUIRED": "on",
+    "CLAUDE_PLUGIN_OPTION_REQUIRE_VAULT": "on",
+    "CLAUDE_PLUGIN_OPTION_AUDIT_LOG_PATH": "C:\\ProgramData\\secrets-guard\\audit.log"
   }
 }
 ```
+
+> **Este es el ÚNICO `managed-settings.json` que se usa.** Pégalo tal cual. Está en **modo
+> estricto: Keeper obligatorio y bloqueo por defecto** —
+> - `REQUIRE_VAULT=on`: si NO hay bóveda configurada, bloquea los prompts y muestra cómo
+>   configurarla (`secrets-guard install` instala el CLI de Keeper, pide el token, hace
+>   `ksm profile init` y valida).
+> - `GUARD_REQUIRED=on`: falla cerrado — si el guard no puede verificar un prompt/entrada/
+>   salida contra la bóveda, **bloquea** en vez de degradar.
+> - `PRELOAD_SECRETS=on`: carga TODA la bóveda en caché y redacta/bloquea cualquier valor en
+>   prompts, entradas, salidas y lecturas de archivos.
+>
+> Para una postura **no bloqueante** (degradar al detector cuando falte la bóveda), cambia
+> `REQUIRE_VAULT` y `GUARD_REQUIRED` a `auto`/`off`.
 
 > Las `\\` dobles en cualquier ruta (audit log, `KSM_INI_FILE`) son obligatorias (escape de JSON).
 
@@ -155,55 +166,35 @@ Pega este contenido y **guárdalo como UTF-8 (sin BOM)**:
 > no esté en `off`**. Verifícalo con `secrets-guard doctor` (avisa si la precarga está
 > apagada).
 
-#### Credencial de la bóveda — elige UNA estrategia
+### 3. Cómo se provee la credencial de la bóveda (dos estrategias)
 
-`KSM_CONFIG` es la forma **recomendada para flota**: una sola credencial base64 machine-wide
-que funciona para **todos** los usuarios sin depender de un perfil `ksm` local ni de la
-ubicación del `keeper.ini`. Obtenla con `ksm profile export --file-format json` y pégala como
-valor de `KSM_CONFIG`. Si la usas, `KSM_INI_FILE` se ignora (tiene precedencia y no necesita
-INI).
+El bloque de arriba **no** incluye credencial: por defecto cada usuario configura su perfil
+con `secrets-guard install` (paso 4). Elige UNA estrategia:
 
-> 🚨 **Rellena o elimina `KSM_CONFIG` — no dejes el placeholder.** Si guardas el JSON con el
-> literal `<base64-keeper-config>` sin reemplazar, la bóveda **deja de funcionar**: ksm
-> intentará usar esa config inválida y, además, secrets-guard omite la autodetección del
-> `keeper.ini` local cuando `KSM_CONFIG` está presente. Si **no** vas a embeber credencial,
-> **borra la línea `KSM_CONFIG` por completo** y cada usuario usa su perfil `ksm`/`keeper-ksm`
-> local (autodetectado, ver más abajo).
+- **Per-usuario (recomendada, por defecto):** no agregues nada al managed-settings. Cada
+  usuario ejecuta `secrets-guard install`, que instala el CLI de Keeper, pide su one-time
+  token, hace `ksm profile init` y valida. secrets-guard autodetecta el perfil (incl.
+  `~/.keeper/keeper.ini`) desde cualquier directorio.
+- **Credencial de flota (opcional):** si prefieres una sola credencial machine-wide para
+  todos (sin perfil local por usuario), **añade una única clave dentro de `env`** del bloque
+  de arriba: `"KSM_CONFIG": "<base64>"` (obtén el base64 con `ksm profile export
+  --file-format json`). Si la usas, rellénala de verdad — **no dejes un placeholder**, porque
+  un `KSM_CONFIG` inválido rompe la resolución y desactiva la autodetección del perfil local.
 
-> ⚠️ **`KSM_INI_FILE` y la NO-expansión de variables.** Los valores de `env` del
-> managed-settings se aplican **literales**: Claude Code **no** expande `%USERPROFILE%` ni
-> `${HOME}`. Por eso **no** pongas `"KSM_INI_FILE": "%USERPROFILE%\\.keeper\\keeper.ini"` en el
-> archivo machine-wide (quedaría literal y no resolvería). Opciones correctas:
-> - **No lo pongas** (recomendado): 0.7.1 autodetecta `~/.keeper/keeper.ini` por usuario.
-> - **Embebe `KSM_CONFIG`** (arriba): no depende de ningún `keeper.ini`.
-> - **Per-usuario** (solo si el `keeper.ini` está en una ruta no estándar): que el propio
->   usuario lo fije con
->   `[Environment]::SetEnvironmentVariable("KSM_INI_FILE", "$env:USERPROFILE\.keeper\keeper.ini", "User")`
->   y reinicie Claude Code. Ahí sí se expande, porque lo resuelve el shell al arrancar.
-
-### 3. (Opcional) Embeber la credencial de Keeper
-
-El bloque de arriba ya incluye la línea `KSM_CONFIG`. Rellénala con el base64 de tu perfil
-para que la bóveda funcione machine-wide sin perfil `ksm` local por usuario:
-
-```json
-"KSM_CONFIG": "<base64-keeper-config>"
-```
-
-Para obtener el base64: `ksm profile export --file-format json` (o el que ya tengas).
-Si prefieres que cada usuario use su propio perfil `ksm` local, **elimina la línea
-`KSM_CONFIG`** del managed-settings.
+> ⚠️ **No pongas `KSM_INI_FILE` en el managed-settings.** Los valores de `env` se aplican
+> **literales**: Claude Code **no** expande `%USERPROFILE%` ni `${HOME}`, así que una ruta
+> per-usuario no resolvería. Usa la autodetección (por defecto) o, si el `keeper.ini` está en
+> una ruta no estándar, que el usuario fije `KSM_INI_FILE` a nivel de Usuario en su shell.
 
 ### 4. Instalar la CLI y verificar
 
-El plugin instala su CLI automáticamente al iniciar la sesión (hook SessionStart, sin
-admin). También puedes instalarla a mano y verificar el estado local:
+El plugin instala su propio CLI al iniciar la sesión (hook SessionStart, sin admin). Para el
+onboarding completo de la bóveda, ejecuta:
 
 ```powershell
-secrets-guard install          # instala la CLI en el PATH del usuario (sin admin),
-                               # limpia componentes legacy, revisa la bóveda y calienta la caché
+secrets-guard install          # instala el CLI de Keeper si falta, PIDE tu one-time token,
+                               # hace `ksm profile init` y VALIDA la conexión (interactivo)
 secrets-guard doctor           # reporta el estado local de bóveda/guard
-secrets-guard dlp-status       # estado del guard local
 
 # El managed-settings quedó bien:
 Get-Content "C:\ProgramData\ClaudeCode\managed-settings.json" | ConvertFrom-Json |
@@ -261,15 +252,13 @@ y el token por los tuyos):
 | `strictKnownMarketplaces` | solo hsoft | Solo se puede usar este marketplace |
 | `TOOL_INPUT_POLICY` | `deny` | Niega entradas de herramienta con secretos en texto plano |
 | `TOOL_OUTPUT_MODE` | `redact` | Redacta secretos en la salida de herramientas |
-| `SANDBOX` | `off` | Solo redacción (sin renderizado de referencias). `on` = renderizado en sitio |
-| `PRELOAD_SECRETS` | `auto` | Guard proactivo: carga la bóveda local en caché en memoria y redacta/bloquea cualquier valor en prompts y salidas de herramientas (incl. lecturas de archivos). **`off` lo desactiva**: solo se redactan valores resueltos en la sesión, y un `Read` de un secreto no referenciado queda **sin censurar** |
-| `GUARD_REQUIRED` | `auto` | `auto` cae al detector si la bóveda no está disponible (no brickea). `on` falla cerrado: bloquea prompts/entradas sin verificar **y** la salida de una herramienta si la bóveda está configurada pero no cargó. `off` nunca falla cerrado |
+| `PRELOAD_SECRETS` | `on` | Guard proactivo: carga TODA la bóveda en caché en memoria y redacta/bloquea cualquier valor en prompts y salidas de herramientas (incl. lecturas de archivos). `on` y `auto` son equivalentes; **`off` lo desactiva** (solo se redactan valores resueltos en la sesión, y un `Read` de un secreto no referenciado queda **sin censurar**) |
+| `GUARD_REQUIRED` | `on` | **Falla cerrado** (modo estricto): bloquea prompts/entradas/salidas que no se puedan verificar contra la bóveda. `auto` degrada al detector si la bóveda no está disponible (no brickea); `off` nunca falla cerrado |
 | `REQUIRE_VAULT` | `on` | Onboarding obligatorio: si NO hay bóveda configurada, bloquea los prompts y muestra los pasos (carpeta compartida → app en Secrets Manager → token → `secrets-guard install`). `off` permite usar sin bóveda (degrada al detector) |
 | `KSM_CONFIG` | base64 (o ausente) | Credencial de Keeper machine-wide para toda la flota; si se omite, cada usuario usa su perfil `ksm`/`keeper-ksm` local |
 
-> `KERNEL_DLP` está **deprecado / no-op** y ya no se incluye en la configuración.
 > `KSM_INI_FILE` **no** se pone en el managed-settings (los valores son literales, sin
-> expansión de `%USERPROFILE%`); 0.7.1 autodetecta `~/.keeper/keeper.ini` por usuario.
+> expansión de `%USERPROFILE%`); secrets-guard autodetecta `~/.keeper/keeper.ini` por usuario.
 
 ## Desinstalar / revertir
 

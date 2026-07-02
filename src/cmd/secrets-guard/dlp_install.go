@@ -63,6 +63,9 @@ func runDoctor() {
 	prov, n, err := vaultValueCount(cfg)
 	if err != nil {
 		fmt.Printf("  vault:          NOT ready — %v\n", err)
+		if h := keeperErrorHint(err.Error()); h != "" {
+			fmt.Println("  → " + h)
+		}
 	} else {
 		fmt.Printf("  vault:          %s reachable (%d secret values)\n", prov, n)
 	}

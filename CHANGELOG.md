@@ -6,6 +6,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-07-02
+
+### Fixed
+- **`secrets-guard install` no longer keeps a stale CLI when the binary is busy.** On Windows a
+  loaded executable cannot be overwritten in place, so a previous session's running CLI made the
+  self-install silently keep the old binary — `doctor` then reported a version behind the plugin
+  (e.g. plugin 0.8.3 but `doctor` 0.8.2). The installer now displaces the locked binary to
+  `<bin>.old` (Windows allows renaming a running image) and moves the fresh one into place, so the
+  next launch runs the new version; the displaced copy is cleaned up on the following install.
+
+### Added
+- **Actionable hints for well-known Keeper failures in `doctor` and `install`.** When the vault
+  can't be validated, the diagnostics now explain the exact fix instead of only echoing the raw
+  error:
+  - `This client is locked to a different ip address` → the Secrets Manager application/token is
+    IP-locked and this machine's egress IP differs (VPN / corporate NAT / DHCP); turn OFF
+    "Lock to IP Address", issue a new token, and re-run `secrets-guard install`.
+  - `Unable to validate application access` → bind a Shared Folder (with at least one record) to
+    the application and issue a new token.
+  - no profile loaded → run `secrets-guard install` and paste a one-time token.
+
 ## [0.8.3] - 2026-07-02
 
 ### Fixed

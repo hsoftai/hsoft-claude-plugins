@@ -84,6 +84,27 @@ func promptKeeperToken() string {
 	return strings.TrimSpace(line)
 }
 
+// keeperErrorHint returns actionable guidance for well-known Keeper CLI failures (surfaced by
+// `doctor`/`install`), or "" when the error isn't recognized. These are Keeper-side issues
+// secrets-guard cannot fix on its own; the hint tells the user exactly what to change.
+func keeperErrorHint(errMsg string) string {
+	msg := strings.ToLower(errMsg)
+	switch {
+	case strings.Contains(msg, "locked to a different ip"):
+		return "Keeper IP-lock: the Secrets Manager application/token is locked to a fixed IP, but this " +
+			"machine's egress IP differs (VPN / corporate NAT / DHCP). In Keeper, turn OFF 'Lock to IP " +
+			"Address' on the application's client device, generate a NEW one-time token, and re-run " +
+			"`secrets-guard install`."
+	case strings.Contains(msg, "unable to validate keeper application access"):
+		return "The Keeper Secrets Manager application has no accessible records. Bind a Shared Folder " +
+			"(with at least one record) to the application, generate a new token, and re-run " +
+			"`secrets-guard install`."
+	case strings.Contains(msg, "ini config") || strings.Contains(msg, "sdk client has not been loaded"):
+		return "No Keeper profile is loaded. Run `secrets-guard install` and paste a one-time token."
+	}
+	return ""
+}
+
 // printKeeperSetupSteps prints the Keeper setup instructions (shown when no token is given or
 // validation fails). Mirrors the hook's onboarding message.
 func printKeeperSetupSteps() {

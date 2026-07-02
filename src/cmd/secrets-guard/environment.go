@@ -158,7 +158,11 @@ func runInstall() {
 		}
 	} else {
 		fmt.Printf("  • Vault: NOT configured/validated — %s\n", detail)
-		printKeeperSetupSteps()
+		if h := keeperErrorHint(detail); h != "" {
+			fmt.Println("  → " + h)
+		} else {
+			printKeeperSetupSteps()
+		}
 	}
 
 	fmt.Println()

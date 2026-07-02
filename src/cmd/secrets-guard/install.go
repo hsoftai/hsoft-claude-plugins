@@ -35,18 +35,39 @@ func selfInstall(dir string, quiet bool) (string, error) {
 	}
 	dst := filepath.Join(dir, installBinName())
 
+	// Best-effort cleanup of any leftover displaced binaries from a previous busy
+	// replace (see below). They are no longer referenced once this returns.
+	cleanupDisplaced(dir)
+
 	if fileChanged(src, dst) {
 		tmp := dst + ".tmp"
 		if err := copyFile(src, tmp, 0o755); err != nil {
 			return dst, err
 		}
 		if err := os.Rename(tmp, dst); err != nil {
-			os.Remove(tmp)
-			// The destination may be busy (another session's CLI is running and
-			// has the file locked, common on Windows). If a copy already exists,
-			// treat it as installed; otherwise surface the error.
-			if _, statErr := os.Stat(dst); statErr != nil {
-				return dst, err
+			// The destination is likely busy: another session's CLI is running and
+			// Windows refuses to overwrite a loaded image in place. Windows DOES
+			// allow renaming a running executable, so displace the stale binary and
+			// move the fresh one into its place — the next process launch picks up
+			// the new version instead of silently keeping the old one (which caused
+			// `doctor` to report a version behind the plugin).
+			displaced := dst + ".old"
+			_ = os.Remove(displaced)
+			if renErr := os.Rename(dst, displaced); renErr == nil {
+				if err2 := os.Rename(tmp, dst); err2 != nil {
+					// Couldn't put the new one in place; restore the old and keep it.
+					_ = os.Rename(displaced, dst)
+					os.Remove(tmp)
+				}
+				// The displaced copy may still be locked by the running process; it is
+				// removed on the next selfInstall via cleanupDisplaced.
+			} else {
+				os.Remove(tmp)
+				// Could not even displace it. If a copy exists, keep it; otherwise
+				// surface the original error.
+				if _, statErr := os.Stat(dst); statErr != nil {
+					return dst, err
+				}
 			}
 		}
 	}
@@ -55,6 +76,14 @@ func selfInstall(dir string, quiet bool) (string, error) {
 		return dst, err
 	}
 	return dst, nil
+}
+
+// cleanupDisplaced removes the `<bin>.old` displaced-binary left behind when a
+// prior selfInstall replaced a busy (locked) executable. It is best-effort: if
+// the file is still locked by a running process the removal fails silently and
+// is retried on the next call.
+func cleanupDisplaced(dir string) {
+	os.Remove(filepath.Join(dir, installBinName()+".old"))
 }
 
 // fileChanged reports whether src should be (re)copied to dst: true when dst is
