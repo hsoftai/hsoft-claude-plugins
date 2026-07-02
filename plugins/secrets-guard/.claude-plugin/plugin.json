@@ -1,7 +1,7 @@
 {
   "name": "secrets-guard",
   "displayName": "secrets-guard",
-  "version": "0.8.4",
+  "version": "0.8.5",
   "description": "Keep secrets out of the model: block plaintext secrets in prompts, resolve vault references (Keeper/1Password) into tool input, and redact secrets leaked in tool output.",
   "author": {
     "name": "Humphrey Consulting Group"

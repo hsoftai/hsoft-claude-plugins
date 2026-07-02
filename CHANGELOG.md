@@ -6,6 +6,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-07-02
+
+### Changed
+- **`secrets-guard install` is now fully self-healing — it fixes a stale, locked or dirty CLI
+  on its own, with no manual commands.**
+  - **Stale version:** `install` now sources the NEWEST binary available — the authoritative
+    build bundled with the plugin, discovered via `CLAUDE_PLUGIN_ROOT` and the user's Claude
+    plugins directory — instead of only re-copying the running process. So an out-of-date
+    user-PATH CLI running `install` upgrades ITSELF from the plugin bundle, rather than copying
+    its own old version back over itself (which left `doctor` reporting a version behind the
+    plugin). A locally-built `dev` binary is never auto-downgraded.
+  - **Version-aware copy:** the installer decides to re-copy by comparing the source and
+    installed versions (authoritative), not just file size/mtime — two adjacent builds can share
+    an identical size, which the old heuristic missed. Re-running `install` when already
+    up to date does nothing (no churn).
+  - **Locked binary:** if the target is busy (a running CLI holds the image locked, common on
+    Windows), it is displaced to `<bin>.old` and the fresh binary is put in its place; the
+    displaced copy is cleaned up on the next install. Also cleans leftover `<bin>.tmp`.
+  - **Dirty cache:** `install` resets this session's in-memory cache daemon so the guard
+    re-primes from the just-installed binary instead of a daemon still running old code.
+
 ## [0.8.4] - 2026-07-02
 
 ### Fixed

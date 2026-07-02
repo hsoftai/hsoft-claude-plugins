@@ -40,6 +40,16 @@ func persistManagedKeeperIni() {
 	_ = os.WriteFile(p, []byte(ini), 0o600)
 }
 
+// resetSessionCache stops this session's cache daemon (if any) so the redaction
+// guard re-primes from the freshly installed binary instead of a daemon still
+// running old code. Best-effort and silent; no-op when there is no session or no
+// daemon, and the cache re-primes automatically on the next prompt/tool event.
+func resetSessionCache() {
+	if sess := os.Getenv("SG_SESSION"); sess != "" {
+		cache.New().Shutdown(sess)
+	}
+}
+
 // removeIfExists deletes a file or directory if present; returns true if it existed.
 func removeIfExists(path string) bool {
 	if path == "" {
@@ -87,16 +97,38 @@ func runInstall() {
 	fmt.Println()
 
 	hadCLI := cliInstalled()
-	dst, err := selfInstall(dir, false)
+	// Self-heal a stale CLI: source the NEWEST binary available (the plugin ships the
+	// authoritative build), not just this running process — so an old user-PATH CLI
+	// running `install` upgrades itself from the plugin bundle instead of copying its
+	// own outdated version back over itself.
+	src, upgradeTo := freshestInstallSource()
+	// Force the copy only when the installed binary's version differs from the source
+	// (or is missing). Two adjacent builds can share an identical size, so the cheap
+	// size/mtime heuristic in installFrom would miss a real version change; the explicit
+	// version check catches it. When they already match (e.g. re-running install from the
+	// up-to-date CLI) force stays false, so we don't needlessly displace the binary.
+	targetDir := dir
+	if targetDir == "" {
+		targetDir = installTargetDir()
+	}
+	force := binaryVersion(src) != binaryVersion(filepath.Join(targetDir, installBinName()))
+	dst, err := installFrom(src, dir, false, force)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ✗ CLI install failed:", err)
 		os.Exit(1)
 	}
-	if hadCLI {
+	switch {
+	case upgradeTo != "":
+		fmt.Printf("  • CLI: upgraded to %s at %s\n", upgradeTo, dst)
+	case hadCLI:
 		fmt.Printf("  • CLI: already present — refreshed at %s\n", dst)
-	} else {
+	default:
 		fmt.Printf("  • CLI: installed at %s\n", dst)
 	}
+	// Reset any stale in-session cache so the guard re-primes from the just-installed
+	// binary rather than a daemon still serving old code. Best-effort; re-primes on the
+	// next prompt/tool event.
+	resetSessionCache()
 
 	stale := staleComponents()
 	if len(stale) == 0 {
